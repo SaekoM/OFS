@@ -4,12 +4,16 @@
 
 #include "OpenFunscripter.h"
 #include "OFS_Simulator3D.h"
+#include "Funscript.h"
 #include "OFS_Util.h"
 
 #include "subprocess.h"
 #include "imgui.h"
+#include "imgui_stdlib.h"
+#include "state/SimulatorState.h"
 #include "stb_sprintf.h"
 #include "stb_image_write.h"
+#include "OFS_FileLogging.h"
 
 #include <cmath>
 #include <cstdint>
@@ -17,118 +21,288 @@
 #include <thread>
 #include <vector>
 
+// Even output width for a target height at the video's aspect (16:9 fallback).
+static int widthForHeight(int h, uint16_t vw, uint16_t vh) noexcept
+{
+    int w = (vh > 0) ? (int)std::lround((double)vw * h / (double)vh) : (h * 16 / 9);
+    w -= (w & 1);
+    return w < 2 ? 2 : w;
+}
+
+// Stroke position (0..1) of the active script at time t; centered if it has no data.
+static float strokeAt(OpenFunscripter* app, float t) noexcept
+{
+    auto& s = app->ActiveFunscript();
+    if (!s || s->Actions().empty()) return 0.5f;
+    return s->GetPositionAtTime(t) / 100.f;
+}
+
+// The 2D ScriptSimulator's persisted config (colors/opacity), shared by the app.
+static SimulatorState& sim2DConfig() noexcept
+{
+    static const uint32_t handle = OFS_ProjectState<SimulatorState>::Register(SimulatorState::StateName);
+    return SimulatorState::State(handle);
+}
+
+// Pack an ImColor to ImU32 with the sim's global opacity folded into alpha.
+static ImU32 simColor(const ImColor& col, float opacity) noexcept
+{
+    ImVec4 v = col.Value;
+    v.w *= opacity;
+    return ImGui::ColorConvertFloat4ToU32(v);
+}
+
+// Previous/next scripted action positions (0..100, -1 if none) around time t.
+static void adjacentPos(std::shared_ptr<Funscript>& s, float t, int& prevPos, int& nextPos) noexcept
+{
+    prevPos = -1; nextPos = -1;
+    if (!s) return;
+    const FunscriptAction* pa = s->GetActionAtTime(t, 0.02f);
+    if (!pa) pa = s->GetPreviousActionBehind(t);
+    const FunscriptAction* na = s->GetNextActionAhead(t);
+    if (pa && na == pa) na = s->GetNextActionAhead(pa->atS);
+    if (pa) prevPos = pa->pos;
+    if (na) nextPos = na->pos;
+}
+
+// CPU-rasterize the 2D stroke bar into a top-down, transparent RGBA buffer, using
+// the ScriptSimulator's configured colors + height lines + indicators.
+static void renderBar2D(float pos01, int prevPos, int nextPos, int w, int h,
+                        const SimulatorState& sc, std::vector<uint8_t>& out) noexcept
+{
+    out.assign((size_t)w * (size_t)h * 4u, 0);
+    auto fill = [&](int x0, int y0, int x1, int y1, ImU32 c) {
+        if (x0 < 0) x0 = 0; if (y0 < 0) y0 = 0;
+        if (x1 > w) x1 = w; if (y1 > h) y1 = h;
+        const uint8_t r = c & 0xFF, g = (c >> 8) & 0xFF, b = (c >> 16) & 0xFF, a = (c >> 24) & 0xFF;
+        for (int y = y0; y < y1; ++y)
+            for (int x = x0; x < x1; ++x) {
+                const size_t i = ((size_t)y * w + x) * 4u;
+                out[i] = r; out[i + 1] = g; out[i + 2] = b; out[i + 3] = a;
+            }
+    };
+    const int barW = (int)(w * 0.42f);
+    const int bx0 = (w - barW) / 2, bx1 = bx0 + barW;
+    const int m = (int)(h * 0.04f);
+    const int by0 = m, by1 = h - m, barH = by1 - by0;
+    if (barW <= 0 || barH <= 0) return;
+    const float op = sc.GlobalOpacity;
+    auto hline = [&](float posPct, ImU32 c, int lw) {
+        if (lw < 1) lw = 1;
+        const int y = by1 - (int)((posPct / 100.f) * barH);
+        fill(bx0, y - lw / 2, bx1, y - lw / 2 + lw, c);
+    };
+    fill(bx0, by0, bx1, by1, simColor(sc.Back, op));                        // track
+    fill(bx0, by1 - (int)(pos01 * barH), bx1, by1, simColor(sc.Front, op)); // fill
+    if (sc.EnableHeightLines) {
+        const ImU32 lc = simColor(sc.ExtraLines, op);
+        for (int i = 1; i < 10; ++i) hline(i * 10.f, lc, (int)sc.LineWidth);
+    }
+    if (sc.EnableIndicators) {
+        const ImU32 ic = simColor(sc.Indicator, op);
+        if (prevPos > 0 && prevPos < 100) hline((float)prevPos, ic, (int)sc.LineWidth);
+        if (nextPos > 0 && nextPos < 100) hline((float)nextPos, ic, (int)sc.LineWidth);
+    }
+    const int bt = 2;                                                       // border
+    const ImU32 bc = simColor(sc.Border, op);
+    fill(bx0, by0, bx1, by0 + bt, bc);
+    fill(bx0, by1 - bt, bx1, by1, bc);
+    fill(bx0, by0, bx0 + bt, by1, bc);
+    fill(bx1 - bt, by0, bx1, by1, bc);
+}
+
 void OFS_PreviewExporter::Init() noexcept
 {
     stateHandle = OFS_AppState<PreviewExportState>::Register(PreviewExportState::StateName);
 }
 
-void OFS_PreviewExporter::beginExport(const std::string& outputPath, float start, float end) noexcept
+void OFS_PreviewExporter::spawnFfmpeg(std::vector<std::string> args, std::string tempDir) noexcept
 {
-    if (exporting.load()) return;
-    auto& st = PreviewExportState::State(stateHandle);
-    auto app = OpenFunscripter::ptr;
-    const char* videoPath = app->player->VideoPath();
-    if (!videoPath || !*videoPath || end <= start) return;
-
-    // Output dimensions: height fixed, width from the video aspect (even).
-    const int outH = st.resolution;
-    const uint16_t vw = app->player->VideoWidth();
-    const uint16_t vh = app->player->VideoHeight();
-    int outW = (vh > 0) ? (int)std::lround((double)vw * outH / (double)vh) : (outH * 16 / 9);
-    outW -= (outW & 1);
-    if (outW < 2) outW = 2;
-
-    // Optionally render the simulator to a transparent PNG sequence (main thread, GL).
-    const bool doOverlay = st.overlaySim && !app->LoadedFunscripts().empty();
-    std::string framePattern, tempDir;
-    int ox = 0, oy = 0;
-    if (doOverlay) {
-        int ow = ((int)std::lround(st.simW * outW)) & ~1; if (ow < 2) ow = 2;
-        int oh = ((int)std::lround(st.simH * outH)) & ~1; if (oh < 2) oh = 2;
-        ox = (int)std::lround(st.simX * outW);
-        oy = (int)std::lround(st.simY * outH);
-
-        tempDir = Util::Prefpath("preview_frames");
-        std::error_code ec;
-        std::filesystem::remove_all(std::filesystem::u8path(tempDir), ec);
-        Util::CreateDirectories(std::filesystem::u8path(tempDir));
-
-        int frames = (int)std::lround((double)(end - start) * st.fps);
-        if (frames < 1) frames = 1;
-
-        auto& sim = app->GetSimulator3D();
-        auto& scripts = app->LoadedFunscripts();
-        std::vector<uint8_t> pixels;
-        for (int i = 0; i < frames; ++i) {
-            const float t = start + (float)i / (float)st.fps;
-            if (!sim.RenderPoseRGBA(scripts, t, ow, oh, pixels)) break;
-            char name[32];
-            stbsp_snprintf(name, sizeof(name), "frame_%05d.png", i);
-            const auto p = (std::filesystem::u8path(tempDir) / name).u8string();
-            stbi_write_png(p.c_str(), ow, oh, 4, pixels.data(), ow * 4);
-        }
-        framePattern = (std::filesystem::u8path(tempDir) / "frame_%05d.png").u8string();
+    { // log the exact command so failures are diagnosable from the log file
+        std::string cmd;
+        for (auto& s : args) { cmd += '"'; cmd += s; cmd += "\" "; }
+        LOGF_INFO("[PreviewExport] %s", cmd.c_str());
     }
-
-    const std::string ffmpeg = Util::FfmpegPath().u8string();
-    char buf[160];
-
-    std::vector<std::string> a;
-    a.push_back(ffmpeg);
-    a.push_back("-y");
-    a.push_back("-hide_banner");
-    a.push_back("-loglevel"); a.push_back("error"); // keep stderr small
-    stbsp_snprintf(buf, sizeof(buf), "%.3f", start);       a.push_back("-ss"); a.push_back(buf);
-    a.push_back("-i"); a.push_back(videoPath);
-    stbsp_snprintf(buf, sizeof(buf), "%.3f", end - start); a.push_back("-t"); a.push_back(buf);
-
-    if (doOverlay) {
-        stbsp_snprintf(buf, sizeof(buf), "%d", st.fps); a.push_back("-framerate"); a.push_back(buf);
-        a.push_back("-i"); a.push_back(framePattern);
-        stbsp_snprintf(buf, sizeof(buf), "[0:v]fps=%d,scale=-2:%d[bg];[bg][1:v]overlay=%d:%d",
-                       st.fps, st.resolution, ox, oy);
-        a.push_back("-filter_complex"); a.push_back(buf);
-    } else {
-        stbsp_snprintf(buf, sizeof(buf), "fps=%d,scale=-2:%d:flags=lanczos", st.fps, st.resolution);
-        a.push_back("-vf"); a.push_back(buf);
-    }
-    a.push_back("-an");
-
-    if (st.format == 0) { // animated WebP
-        a.push_back("-c:v"); a.push_back("libwebp");
-        stbsp_snprintf(buf, sizeof(buf), "%d", st.quality); a.push_back("-q:v"); a.push_back(buf);
-        a.push_back("-loop"); a.push_back("0");
-    } else { // AV1 (webm)
-        const int crf = (int)std::lround((100.0 - st.quality) * 0.63); // quality 100->crf 0, 0->63
-        a.push_back("-c:v"); a.push_back("libsvtav1");
-        stbsp_snprintf(buf, sizeof(buf), "%d", crf); a.push_back("-crf"); a.push_back(buf);
-        a.push_back("-b:v"); a.push_back("0");
-    }
-    a.push_back(outputPath);
-
+    lastErrorText.clear();
     exporting.store(true);
     hasRun = true;
-    std::thread([this, a = std::move(a), tempDir]() mutable {
+    std::thread([this, args = std::move(args), tempDir = std::move(tempDir)]() mutable {
         std::vector<const char*> argv;
-        argv.reserve(a.size() + 1);
-        for (auto& s : a) argv.push_back(s.c_str());
+        argv.reserve(args.size() + 1);
+        for (auto& s : args) argv.push_back(s.c_str());
         argv.push_back(nullptr);
 
         int rc = -1;
+        std::string err;
         struct subprocess_s proc;
         if (subprocess_create(argv.data(), subprocess_option_no_window, &proc) == 0) {
             if (proc.stdout_file) { fclose(proc.stdout_file); proc.stdout_file = nullptr; }
-            if (proc.stderr_file) { fclose(proc.stderr_file); proc.stderr_file = nullptr; }
             subprocess_join(&proc, &rc);
+            // Read ffmpeg's stderr (kept small by -loglevel error) for diagnostics.
+            if (proc.stderr_file) {
+                char b[512];
+                size_t n;
+                while ((n = fread(b, 1, sizeof(b), proc.stderr_file)) > 0)
+                    err.append(b, n);
+            }
             subprocess_destroy(&proc);
         }
         if (!tempDir.empty()) {
             std::error_code ec;
             std::filesystem::remove_all(std::filesystem::u8path(tempDir), ec);
         }
+        lastErrorText = std::move(err);
         lastResult.store(rc);
+        if (rc != 0) LOGF_ERROR("[PreviewExport] ffmpeg failed (%d): %s", rc, lastErrorText.c_str());
         exporting.store(false);
     }).detach();
+}
+
+void OFS_PreviewExporter::OpenForChapter(float start, float end) noexcept
+{
+    auto& st = PreviewExportState::State(stateHandle);
+    st.rangeMode = 1; // timestamps
+    startTime = start;
+    endTime = end;
+    startEditing = false;
+    endEditing = false;
+}
+
+void OFS_PreviewExporter::startExport(const std::string& outputPath, float start, float end) noexcept
+{
+    if (exporting.load() || renderingFrames) return;
+    auto& st = PreviewExportState::State(stateHandle);
+    auto app = OpenFunscripter::ptr;
+    const char* videoPath = app->player->VideoPath();
+    if (!videoPath || !*videoPath || end <= start) return;
+
+    const int outH = st.resolution;
+    const uint16_t vw = app->player->VideoWidth();
+    const uint16_t vh = app->player->VideoHeight();
+    const int outW = widthForHeight(outH, vw, vh);
+
+    const bool doOverlay = st.overlaySim && !app->LoadedFunscripts().empty();
+
+    char buf[192];
+    std::string tempDir, framePattern;
+    int ox = 0, oy = 0, ow = 0, oh = 0;
+    if (doOverlay) {
+        ow = ((int)std::lround(st.simW * outW)) & ~1; if (ow < 2) ow = 2;
+        oh = ((int)std::lround(st.simH * outH)) & ~1; if (oh < 2) oh = 2;
+        ox = (int)std::lround(st.simX * outW);
+        oy = (int)std::lround(st.simY * outH);
+        tempDir = Util::Prefpath("preview_frames");
+        std::error_code ec;
+        std::filesystem::remove_all(std::filesystem::u8path(tempDir), ec);
+        Util::CreateDirectories(std::filesystem::u8path(tempDir));
+        framePattern = (std::filesystem::u8path(tempDir) / "frame_%05d.png").u8string();
+    }
+
+    // Use OFS's ffmpeg (now the gyan "full" build, which includes libsvtav1).
+    const std::string ffmpeg = Util::FfmpegPath().u8string();
+    std::vector<std::string> a;
+    a.push_back(ffmpeg);
+    a.push_back("-y");
+    a.push_back("-hide_banner");
+    a.push_back("-loglevel"); a.push_back("error");
+    // -ss and -t must both be INPUT options on the video (before -i). In overlay
+    // mode a second -i follows, so a -t placed after -i video would bind to that
+    // input instead of trimming the video -> the whole clip would export.
+    stbsp_snprintf(buf, sizeof(buf), "%.3f", start);       a.push_back("-ss"); a.push_back(buf);
+    stbsp_snprintf(buf, sizeof(buf), "%.3f", end - start); a.push_back("-t"); a.push_back(buf);
+    a.push_back("-i"); a.push_back(videoPath);
+
+    if (doOverlay) {
+        stbsp_snprintf(buf, sizeof(buf), "%d", st.fps); a.push_back("-framerate"); a.push_back(buf);
+        a.push_back("-i"); a.push_back(framePattern);
+        stbsp_snprintf(buf, sizeof(buf), "[0:v]fps=%d,scale=%d:%d[bg];[bg][1:v]overlay=%d:%d[outv]",
+                       st.fps, outW, outH, ox, oy);
+        a.push_back("-filter_complex"); a.push_back(buf);
+        // filter_complex disables auto stream selection, so map explicitly.
+        a.push_back("-map"); a.push_back("[outv]");
+        if (st.format == 1) { a.push_back("-map"); a.push_back("0:a?"); } // source audio for AV1
+    } else {
+        stbsp_snprintf(buf, sizeof(buf), "fps=%d", st.fps);
+        a.push_back("-filter:v"); a.push_back(buf);
+        stbsp_snprintf(buf, sizeof(buf), "%dx%d", outW, outH);
+        a.push_back("-s"); a.push_back(buf);
+    }
+
+    if (st.format == 0) { // animated WebP (lossless)
+        a.push_back("-vcodec"); a.push_back("libwebp");
+        a.push_back("-lossless"); a.push_back("1");
+        a.push_back("-loop"); a.push_back("0");
+        a.push_back("-preset"); a.push_back("default");
+    } else { // AV1 (mp4) via libsvtav1 (from PATH ffmpeg)
+        const int preset = Util::Clamp(st.av1Preset, 0, 13);
+        a.push_back("-c:v"); a.push_back("libsvtav1");
+        a.push_back("-crf"); a.push_back("30");
+        a.push_back("-b:v"); a.push_back("0");
+        stbsp_snprintf(buf, sizeof(buf), "%d", preset);
+        a.push_back("-preset"); a.push_back(buf);
+    }
+    if (st.format == 1) { // AV1/mp4 carries the source audio; WebP cannot
+        a.push_back("-c:a"); a.push_back("aac");
+        a.push_back("-b:a"); a.push_back("192k");
+    } else {
+        a.push_back("-an");
+    }
+    a.push_back(outputPath);
+
+    if (doOverlay) {
+        // Kick off the incremental frame-render job; ffmpeg spawns when it finishes.
+        int frames = (int)std::lround((double)(end - start) * st.fps);
+        if (frames < 1) frames = 1;
+        jobFrame = 0;
+        jobFrameCount = frames;
+        jobW = ow; jobH = oh;
+        jobStart = start;
+        jobFps = (float)st.fps;
+        jobTempDir = tempDir;
+        jobArgs = std::move(a);
+        renderingFrames = true;
+        exporting.store(true); // UI shows busy through the whole job
+        hasRun = true;
+    } else {
+        spawnFfmpeg(std::move(a), std::string());
+    }
+}
+
+void OFS_PreviewExporter::Update() noexcept
+{
+    if (!renderingFrames) return;
+    auto app = OpenFunscripter::ptr;
+    auto& sim = app->GetSimulator3D();
+    auto& scripts = app->LoadedFunscripts();
+    const bool use2D = PreviewExportState::State(stateHandle).sim2D;
+    const SimulatorState* sc2D = use2D ? &sim2DConfig() : nullptr;
+
+    // Render a small batch per UI frame to keep the app responsive.
+    constexpr int kBatch = 4;
+    for (int k = 0; k < kBatch && jobFrame < jobFrameCount; ++k, ++jobFrame) {
+        const float t = jobStart + (float)jobFrame / jobFps;
+        bool ok = true;
+        if (use2D) {
+            int pp, np;
+            adjacentPos(app->ActiveFunscript(), t, pp, np);
+            renderBar2D(strokeAt(app, t), pp, np, jobW, jobH, *sc2D, jobPixels);
+        } else {
+            ok = sim.RenderPoseRGBA(scripts, t, jobW, jobH, jobPixels);
+        }
+        if (ok) {
+            char name[32];
+            stbsp_snprintf(name, sizeof(name), "frame_%05d.png", jobFrame);
+            const auto p = (std::filesystem::u8path(jobTempDir) / name).u8string();
+            stbi_write_png(p.c_str(), jobW, jobH, 4, jobPixels.data(), jobW * 4);
+        }
+    }
+
+    if (jobFrame >= jobFrameCount) {
+        renderingFrames = false;
+        spawnFfmpeg(std::move(jobArgs), std::move(jobTempDir));
+        jobArgs.clear();
+        jobTempDir.clear();
+    }
 }
 
 void OFS_PreviewExporter::ShowWindow(bool* open) noexcept
@@ -136,57 +310,72 @@ void OFS_PreviewExporter::ShowWindow(bool* open) noexcept
     if (!*open) return;
     auto& st = PreviewExportState::State(stateHandle);
     auto app = OpenFunscripter::ptr;
+    const uint16_t vw = app->player->VideoWidth();
+    const uint16_t vh = app->player->VideoHeight();
 
     ImGui::Begin("Animated Preview Export###PREVIEW_EXPORT", open, ImGuiWindowFlags_None);
 
-    ImGui::Combo("Format", &st.format, "Animated WebP\0AV1 (webm)\0\0");
-    if (ImGui::InputInt("Height (px)", &st.resolution)) st.resolution = Util::Clamp(st.resolution, 64, 2160);
+    ImGui::Combo("Format", &st.format, "Animated WebP\0AV1 (mp4)\0\0");
+
+    // Resolution: standard heights <= native, at the video's aspect.
+    {
+        char curLabel[32];
+        stbsp_snprintf(curLabel, sizeof(curLabel), "%dx%d", widthForHeight(st.resolution, vw, vh), st.resolution);
+        if (ImGui::BeginCombo("Resolution", curLabel)) {
+            static const int heights[] = {2160, 1440, 1080, 720, 540, 480, 360, 240};
+            for (int h : heights) {
+                if (vh > 0 && h > (int)vh) continue; // no upscaling
+                char lbl[32];
+                stbsp_snprintf(lbl, sizeof(lbl), "%dx%d", widthForHeight(h, vw, vh), h);
+                if (ImGui::Selectable(lbl, st.resolution == h)) st.resolution = h;
+            }
+            ImGui::EndCombo();
+        }
+    }
+
     if (ImGui::InputInt("FPS", &st.fps)) st.fps = Util::Clamp(st.fps, 1, 60);
-    ImGui::SliderInt("Quality", &st.quality, 0, 100);
+
+    if (st.format == 0) {
+        ImGui::TextDisabled("WebP is exported lossless.");
+    } else {
+        if (ImGui::SliderInt("AV1 speed/preset", &st.av1Preset, 0, 13))
+            st.av1Preset = Util::Clamp(st.av1Preset, 0, 13);
+        ImGui::SameLine();
+        ImGui::TextDisabled("(0 best \xE2\x80\xA2 13 fast)");
+    }
 
     ImGui::Separator();
-    ImGui::RadioButton("Chapter", &st.rangeMode, 0);
-    ImGui::SameLine();
-    ImGui::RadioButton("Timestamps", &st.rangeMode, 1);
+    ImGui::TextDisabled("Range (use the chapter right-click menu to fill this from a chapter)");
 
     const double duration = app->player->Duration();
-    float rStart = 0.f, rEnd = 0.f;
-    bool haveRange = false;
-
-    if (st.rangeMode == 0) {
-        auto& chapters = ChapterState::StaticStateSlow().chapters;
-        if (chapters.empty()) {
-            ImGui::TextDisabled("No chapters \xE2\x80\x94 add chapters or switch to Timestamps.");
-        } else {
-            selectedChapter = Util::Clamp(selectedChapter, 0, (int)chapters.size() - 1);
-            if (ImGui::BeginCombo("Chapter", chapters[selectedChapter].name.c_str())) {
-                for (int i = 0; i < (int)chapters.size(); ++i) {
-                    if (ImGui::Selectable(chapters[i].name.c_str(), i == selectedChapter))
-                        selectedChapter = i;
-                }
-                ImGui::EndCombo();
-            }
-            rStart = chapters[selectedChapter].startTime;
-            rEnd = chapters[selectedChapter].endTime;
-            haveRange = true;
+    // HH:MM:SS.mmm text fields, matching the timeline format.
+    auto timeField = [&](const char* label, float& seconds, std::string& str, bool& editing) {
+        if (!editing) {
+            char b[32];
+            Util::FormatTime(b, sizeof(b), seconds, true);
+            str = b;
         }
-    } else {
-        ImGui::InputFloat("Start (s)", &startTime);
-        ImGui::InputFloat("End (s)", &endTime);
-        startTime = Util::Clamp(startTime, 0.f, (float)duration);
-        endTime = Util::Clamp(endTime, 0.f, (float)duration);
-        rStart = startTime;
-        rEnd = endTime;
-        haveRange = true;
-    }
+        ImGui::InputText(label, &str);
+        editing = ImGui::IsItemActive();
+        if (ImGui::IsItemDeactivatedAfterEdit()) {
+            bool ok = false;
+            const float v = Util::ParseTime(str.c_str(), &ok);
+            if (ok) seconds = Util::Clamp(v, 0.f, (float)duration);
+        }
+    };
+    timeField("Start (h:m:s.ms)", startTime, startStr, startEditing);
+    timeField("End (h:m:s.ms)", endTime, endStr, endEditing);
+    const float rStart = startTime;
+    const float rEnd = endTime;
+    const bool haveRange = true;
 
     // ---- Overlay the simulator on the video (draggable live preview) ----
     ImGui::Separator();
     ImGui::Checkbox("Overlay simulator on video", &st.overlaySim);
     if (st.overlaySim) {
+        ImGui::SameLine();
+        ImGui::Checkbox("2D bar (single axis)", &st.sim2D);
         const uint32_t frameTex = app->player->FrameTexture();
-        const uint16_t vw = app->player->VideoWidth();
-        const uint16_t vh = app->player->VideoHeight();
         if (frameTex && vw > 0 && vh > 0) {
             ImGui::TextDisabled("Drag to move \xE2\x80\xA2 drag corner to resize");
             float previewW = ImGui::GetContentRegionAvail().x;
@@ -201,31 +390,71 @@ void OFS_PreviewExporter::ShowWindow(bool* open) noexcept
             const int bh = (int)(st.simH * previewH);
             const ImVec2 bMax(bMin.x + bw, bMin.y + bh);
 
-            // Live sim rendered into the box at the current playhead time.
             if (bw > 4 && bh > 4 && !app->LoadedFunscripts().empty()) {
-                const uint32_t simTex = app->GetSimulator3D().RenderPoseTexture(
-                    app->LoadedFunscripts(), (float)app->player->CurrentTime(), bw, bh);
-                dl->AddImage((ImTextureID)(intptr_t)simTex, bMin, bMax, ImVec2(0, 1), ImVec2(1, 0));
+                if (st.sim2D) {
+                    // 2D stroke bar matching the ScriptSimulator (colors + height lines + indicators).
+                    auto& sc = sim2DConfig();
+                    const float op = sc.GlobalOpacity;
+                    const float ct = (float)app->player->CurrentTime();
+                    const float pos01 = strokeAt(app, ct);
+                    const float trackW = (bMax.x - bMin.x) * 0.42f;
+                    const float tx0 = bMin.x + ((bMax.x - bMin.x) - trackW) * 0.5f, tx1 = tx0 + trackW;
+                    const float mrg = (bMax.y - bMin.y) * 0.04f;
+                    const float ty0 = bMin.y + mrg, ty1 = bMax.y - mrg, barH = ty1 - ty0;
+                    dl->AddRectFilled(ImVec2(tx0, ty0), ImVec2(tx1, ty1), simColor(sc.Back, op));
+                    dl->AddRectFilled(ImVec2(tx0, ty1 - pos01 * barH), ImVec2(tx1, ty1), simColor(sc.Front, op));
+                    if (sc.EnableHeightLines) {
+                        const ImU32 lc = simColor(sc.ExtraLines, op);
+                        for (int i = 1; i < 10; ++i) {
+                            const float y = ty1 - (i * 0.1f) * barH;
+                            dl->AddLine(ImVec2(tx0, y), ImVec2(tx1, y), lc, sc.LineWidth);
+                        }
+                    }
+                    if (sc.EnableIndicators) {
+                        int pp, np;
+                        adjacentPos(app->ActiveFunscript(), ct, pp, np);
+                        const ImU32 ic = simColor(sc.Indicator, op);
+                        const ImU32 tc = simColor(sc.Text, op);
+                        auto ind = [&](int pos) {
+                            if (pos <= 0 || pos >= 100) return;
+                            const float y = ty1 - (pos * 0.01f) * barH;
+                            dl->AddLine(ImVec2(tx0, y), ImVec2(tx1, y), ic, sc.LineWidth);
+                            char b[8]; stbsp_snprintf(b, sizeof(b), "%d", pos);
+                            dl->AddText(ImVec2((tx0 + tx1) * 0.5f - 7.f, y - 7.f), tc, b);
+                        };
+                        ind(pp); ind(np);
+                    }
+                    dl->AddRect(ImVec2(tx0, ty0), ImVec2(tx1, ty1), simColor(sc.Border, op), 0.f, 0, 2.f);
+                } else {
+                    const uint32_t simTex = app->GetSimulator3D().RenderPoseTexture(
+                        app->LoadedFunscripts(), (float)app->player->CurrentTime(), bw, bh);
+                    dl->AddImage((ImTextureID)(intptr_t)simTex, bMin, bMax, ImVec2(0, 1), ImVec2(1, 0));
+                }
             }
+            const float grip = 22.f; // easy-to-grab resize corner
             dl->AddRect(bMin, bMax, IM_COL32(0xFF, 0xE0, 0x40, 0xD0), 0.f, 0, 2.f);
-            dl->AddTriangleFilled(ImVec2(bMax.x - 12, bMax.y), bMax, ImVec2(bMax.x, bMax.y - 12),
+            dl->AddTriangleFilled(ImVec2(bMax.x - grip, bMax.y), bMax, ImVec2(bMax.x, bMax.y - grip),
                                   IM_COL32(0xFF, 0xE0, 0x40, 0xF0));
 
-            // Move handle (whole box) + resize handle (corner).
+            // One handle over the whole box; the drag's starting position (corner or
+            // not) decides resize vs move. Avoids unreliable overlapping-button clicks.
             ImGui::SetCursorScreenPos(bMin);
-            ImGui::InvisibleButton("##simMove", ImVec2((float)bw, (float)bh));
-            ImGui::SetItemAllowOverlap();
+            ImGui::InvisibleButton("##simBox", ImVec2((float)bw, (float)bh));
+            const ImVec2 mp = ImGui::GetIO().MousePos;
+            const bool inCorner = (mp.x >= bMax.x - grip && mp.y >= bMax.y - grip);
+            if (ImGui::IsItemActivated())
+                draggingResize = inCorner;
+            if ((ImGui::IsItemHovered() && inCorner) || (draggingResize && ImGui::IsItemActive()))
+                ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNWSE);
             if (ImGui::IsItemActive()) {
                 const ImVec2 d = ImGui::GetIO().MouseDelta;
-                st.simX += d.x / previewW;
-                st.simY += d.y / previewH;
-            }
-            ImGui::SetCursorScreenPos(ImVec2(bMax.x - 14.f, bMax.y - 14.f));
-            ImGui::InvisibleButton("##simResize", ImVec2(16.f, 16.f));
-            if (ImGui::IsItemActive()) {
-                const ImVec2 d = ImGui::GetIO().MouseDelta;
-                st.simW += d.x / previewW;
-                st.simH += d.y / previewH;
+                if (draggingResize) {
+                    st.simW += d.x / previewW;
+                    st.simH += d.y / previewH;
+                } else {
+                    st.simX += d.x / previewW;
+                    st.simY += d.y / previewH;
+                }
             }
 
             st.simW = Util::Clamp(st.simW, 0.05f, 1.f);
@@ -243,24 +472,27 @@ void OFS_PreviewExporter::ShowWindow(bool* open) noexcept
 
     ImGui::Separator();
     const char* videoPath = app->player->VideoPath();
-    const bool canExport = !exporting.load() && haveRange && rEnd > rStart && videoPath && *videoPath;
+    const bool busy = exporting.load() || renderingFrames;
+    const bool canExport = !busy && haveRange && rEnd > rStart && videoPath && *videoPath;
 
     ImGui::BeginDisabled(!canExport);
     if (ImGui::Button("Export\xE2\x80\xA6")) {
-        const char* filter = st.format == 0 ? "*.webp" : "*.webm";
-        const char* ext = st.format == 0 ? ".webp" : ".webm";
+        const char* filter = st.format == 0 ? "*.webp" : "*.mp4";
+        const char* ext = st.format == 0 ? ".webp" : ".mp4";
         std::string defaultName = std::string("preview") + ext;
         Util::SaveFileDialog("Export animated preview", defaultName,
             [this, rStart, rEnd](Util::FileDialogResult& result) {
-                if (!result.files.empty()) beginExport(result.files[0], rStart, rEnd);
+                if (!result.files.empty()) startExport(result.files[0], rStart, rEnd);
             },
             { filter });
     }
     ImGui::EndDisabled();
 
     ImGui::SameLine();
-    if (exporting.load()) {
-        ImGui::TextDisabled("Exporting\xE2\x80\xA6");
+    if (renderingFrames) {
+        ImGui::TextDisabled("Rendering frames %d/%d\xE2\x80\xA6", jobFrame, jobFrameCount);
+    } else if (exporting.load()) {
+        ImGui::TextDisabled("Encoding\xE2\x80\xA6");
     } else if (hasRun) {
         if (lastResult.load() == 0)
             ImGui::TextColored(ImVec4(0.4f, 1.f, 0.4f, 1.f), "Done");
@@ -268,8 +500,14 @@ void OFS_PreviewExporter::ShowWindow(bool* open) noexcept
             ImGui::TextColored(ImVec4(1.f, 0.4f, 0.4f, 1.f), "ffmpeg failed (%d)", lastResult.load());
     }
 
+    if (hasRun && !exporting.load() && !renderingFrames && lastResult.load() != 0 && !lastErrorText.empty()) {
+        ImGui::PushTextWrapPos(0.f);
+        ImGui::TextColored(ImVec4(1.f, 0.6f, 0.6f, 1.f), "%s", lastErrorText.c_str());
+        ImGui::PopTextWrapPos();
+    }
+
     if (st.format == 1)
-        ImGui::TextDisabled("AV1 requires an ffmpeg build with libsvtav1.");
+        ImGui::TextDisabled("AV1 uses libsvtav1.");
 
     ImGui::End();
 }

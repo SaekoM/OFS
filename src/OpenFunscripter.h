@@ -73,6 +73,7 @@ private:
     void processEvents() noexcept;
 
     void ExportClip(const class ExportClipForChapter* ev) noexcept;
+    void ExportPreview(const class ExportPreviewForChapter* ev) noexcept;
 
     void FunscriptChanged(const FunscriptActionsChangedEvent* ev) noexcept;
     void DragNDrop(const OFS_SDL_Event* ev) noexcept;

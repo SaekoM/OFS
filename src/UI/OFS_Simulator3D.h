@@ -41,8 +41,15 @@ private:
     // the interactive window's fbo when both render in the same frame.
     uint32_t exFbo = 0, exColorTex = 0, exDepthRbo = 0;
     int exWidth = 0, exHeight = 0;
+    // Supersampled FBO: the mesh is rendered here at 2x then downscaled into exFbo
+    // for antialiasing (smooth edges compress far better, esp. for lossless export).
+    uint32_t ssFbo = 0, ssColorTex = 0, ssDepthRbo = 0;
+    int ssWidth = 0, ssHeight = 0;
     uint32_t vao = 0, vbo = 0;
     int meshVertexCount = 0;
+    // Unit vertical box (y 0..1) drawn with a dynamic transform for the stroke-length line.
+    uint32_t lineVao = 0, lineVbo = 0;
+    int lineVertCount = 0;
     // Submesh vertex ranges for the colorable parts:
     // 0=shaft, 1=twistL, 2=twistR, 3=tongue, 4=center.
     static constexpr int PartCount = 5;

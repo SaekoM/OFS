@@ -266,6 +266,21 @@ void Simulator3D::buildMesh() noexcept
     glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)(3 * sizeof(float)));
     glEnableVertexAttribArray(1);
     glBindVertexArray(0);
+
+    // Thin unit vertical box (y 0..1); oriented/scaled per-frame for the stroke line.
+    std::vector<float> lineMesh;
+    appendBox(lineMesh, glm::vec3(0.f, 0.5f, 0.f), glm::vec3(0.012f, 0.5f, 0.012f));
+    lineVertCount = (int)(lineMesh.size() / 6);
+    glGenVertexArrays(1, &lineVao);
+    glBindVertexArray(lineVao);
+    glGenBuffers(1, &lineVbo);
+    glBindBuffer(GL_ARRAY_BUFFER, lineVbo);
+    glBufferData(GL_ARRAY_BUFFER, lineMesh.size() * sizeof(float), lineMesh.data(), GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)(3 * sizeof(float)));
+    glEnableVertexAttribArray(1);
+    glBindVertexArray(0);
 }
 
 // (Re)creates an FBO + color texture + depth renderbuffer at w x h if the size changed.
@@ -313,6 +328,7 @@ void Simulator3D::ensureExportGL(int width, int height) noexcept
     if (!shader) shader = std::make_unique<LightingShader>();
     if (!vao) buildMesh();
     ensureFboSet(exFbo, exColorTex, exDepthRbo, exWidth, exHeight, width, height);
+    ensureFboSet(ssFbo, ssColorTex, ssDepthRbo, ssWidth, ssHeight, width * 2, height * 2); // 2x supersample
 }
 
 void Simulator3D::renderMeshToTexture(uint32_t targetFbo, int w, int h, const float* model, const float* view,
@@ -358,6 +374,35 @@ void Simulator3D::renderMeshToTexture(uint32_t targetFbo, int w, int h, const fl
         glDrawArrays(GL_TRIANGLES, partOffset[i], partCount[i]);
     }
     glBindVertexArray(0);
+
+    // Stroke line: from a fixed ground anchor to the (moving/rotating) cylinder bottom,
+    // so it tilts and stretches with the device rather than staying vertical.
+    if (st.showStrokeLine && lineVertCount > 0) {
+        const glm::mat4 dm = glm::make_mat4(model);
+        const glm::vec3 top = glm::vec3(dm * glm::vec4(0.f, -0.875f, 0.f, 1.f)); // cylinder bottom
+        const glm::vec3 base(0.f, -2.f, 0.f);                                    // fixed ground anchor
+        const glm::vec3 delta = top - base;
+        const float len = glm::length(delta);
+        if (len > 1e-4f) {
+            // Orient the unit +Y box along the anchor->cylinder direction.
+            const glm::vec3 d = delta / len;
+            const glm::vec3 ref = (std::abs(d.y) > 0.99f) ? glm::vec3(1.f, 0.f, 0.f) : glm::vec3(0.f, 1.f, 0.f);
+            const glm::vec3 right = glm::normalize(glm::cross(ref, d));
+            const glm::vec3 fwd = glm::cross(d, right);
+            glm::mat4 R(1.f);
+            R[0] = glm::vec4(right, 0.f);
+            R[1] = glm::vec4(d, 0.f);
+            R[2] = glm::vec4(fwd, 0.f);
+            const glm::mat4 lineModel = glm::translate(glm::mat4(1.f), base) * R
+                * glm::scale(glm::mat4(1.f), glm::vec3(1.f, len, 1.f));
+            shader->ModelMtx(glm::value_ptr(lineModel));
+            const glm::vec4 lineCol(0.90f, 0.90f, 0.95f, 1.f);
+            shader->ObjectColor(glm::value_ptr(lineCol));
+            glBindVertexArray(lineVao);
+            glDrawArrays(GL_TRIANGLES, 0, lineVertCount);
+            glBindVertexArray(0);
+        }
+    }
 
     // Restore state.
     glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)prevFbo);
@@ -414,8 +459,15 @@ uint32_t Simulator3D::RenderPoseTexture(const std::vector<std::shared_ptr<Funscr
     const glm::mat4 view = glm::lookAt(camPos, glm::vec3(0.f), glm::vec3(0.f, 1.f, 0.f));
     const glm::mat4 proj = glm::perspective(glm::radians(45.f), (float)w / (float)h, 0.1f, 100.f);
 
-    renderMeshToTexture(exFbo, exWidth, exHeight, glm::value_ptr(model), glm::value_ptr(view),
+    // Render at 2x into the supersampled FBO, then linearly downscale into exFbo (antialiasing).
+    renderMeshToTexture(ssFbo, ssWidth, ssHeight, glm::value_ptr(model), glm::value_ptr(view),
                         glm::value_ptr(proj), glm::value_ptr(camPos), /*transparent=*/true);
+    GLint prevFbo = 0;
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFbo);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, ssFbo);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, exFbo);
+    glBlitFramebuffer(0, 0, ssWidth, ssHeight, 0, 0, exWidth, exHeight, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+    glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)prevFbo);
     return exColorTex;
 }
 
@@ -466,6 +518,8 @@ void Simulator3D::ShowWindow(bool* open, const std::vector<std::shared_ptr<Funsc
         ImGui::EndDisabled();
         ImGui::SameLine();
         ImGui::Checkbox("Axis gizmo", &st.showGizmo);
+        ImGui::SameLine();
+        ImGui::Checkbox("Stroke line", &st.showStrokeLine);
 
         if (ImGui::Button("Recenter view")) {
             const Simulator3DState def{}; // reset camera to struct defaults

@@ -257,6 +257,8 @@ bool OpenFunscripter::Init(int argc, char* argv[])
         ShouldChangeActiveScriptEvent::HandleEvent(EVENT_SYSTEM_BIND(this, &OpenFunscripter::ScriptTimelineActiveScriptChanged)));
     EV::Queue().appendListener(ExportClipForChapter::EventType,
         ExportClipForChapter::HandleEvent(EVENT_SYSTEM_BIND(this, &OpenFunscripter::ExportClip)));
+    EV::Queue().appendListener(ExportPreviewForChapter::EventType,
+        ExportPreviewForChapter::HandleEvent(EVENT_SYSTEM_BIND(this, &OpenFunscripter::ExportPreview)));
 
     specialFunctions = std::make_unique<SpecialFunctionsWindow>();
     controllerInput = std::make_unique<ControllerInput>();
@@ -1393,6 +1395,12 @@ void OpenFunscripter::ExportClip(const ExportClipForChapter* ev) noexcept
         });
 }
 
+void OpenFunscripter::ExportPreview(const ExportPreviewForChapter* ev) noexcept
+{
+    previewExporter->OpenForChapter(ev->chapter.startTime, ev->chapter.endTime);
+    ShowPreviewExporter = true;
+}
+
 void OpenFunscripter::FunscriptChanged(const FunscriptActionsChangedEvent* ev) noexcept
 {
     // the event passes the address of the Funscript
@@ -1627,6 +1635,7 @@ void OpenFunscripter::Step() noexcept
             undoSystem->ShowUndoRedoHistory(&ofsState.showHistory);
             simulator.ShowSimulator(&ofsState.showSimulator, ActiveFunscript(), player->CurrentTime(), overlayState.SplineMode);
             simulator3D.ShowWindow(&ofsState.showSimulator3D, LoadedFunscripts(), player->CurrentTime());
+            previewExporter->Update();
             previewExporter->ShowWindow(&ShowPreviewExporter);
 
             if (ShowMetadataEditor) {
