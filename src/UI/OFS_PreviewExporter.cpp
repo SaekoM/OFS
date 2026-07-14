@@ -21,7 +21,7 @@
 #include <thread>
 #include <vector>
 
-// Even output width for a target height at the video's aspect (16:9 fallback).
+// Even output width for a target height at the video's aspect (16:9 fallback). 
 static int widthForHeight(int h, uint16_t vw, uint16_t vh) noexcept
 {
     int w = (vh > 0) ? (int)std::lround((double)vw * h / (double)vh) : (h * 16 / 9);
