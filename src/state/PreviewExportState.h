@@ -21,6 +21,17 @@ struct PreviewExportState
     float simY = 0.60f;
     float simW = 0.34f;
     float simH = 0.34f;
+    bool simShowHeightText = false; // draw the current position (0..100) on the sim
+
+    // Append the scrolling script timeline as a band beneath the video.
+    bool overlayTimeline = false;
+    float timelineVisibleTime = 10.f;    // seconds of script shown across the strip
+    float timelineHeightFrac = 0.22f;    // strip height as a fraction of video height
+    bool timelineShowHeightLines = true; // draw the 10..90% reference grid
+    bool timelineAllScripts = false;     // stack all enabled scripts (multi-axis)
+
+    // Pillarbox/letterbox the video region to 16:9 with black bars.
+    bool padTo169 = false;
 
     inline static PreviewExportState& State(uint32_t stateHandle) noexcept
     {
@@ -40,4 +51,11 @@ REFL_TYPE(PreviewExportState)
     REFL_FIELD(simY)
     REFL_FIELD(simW)
     REFL_FIELD(simH)
+    REFL_FIELD(simShowHeightText)
+    REFL_FIELD(overlayTimeline)
+    REFL_FIELD(timelineVisibleTime)
+    REFL_FIELD(timelineHeightFrac)
+    REFL_FIELD(timelineShowHeightLines)
+    REFL_FIELD(timelineAllScripts)
+    REFL_FIELD(padTo169)
 REFL_END

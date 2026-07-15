@@ -26,18 +26,26 @@ private:
     bool startEditing = false, endEditing = false;
     bool draggingResize = false; // true while a drag that started in the resize corner is active
 
-    // Incremental sim-frame render job (overlay). Frames are rendered a few per
-    // UI frame on the main thread (GL), then ffmpeg runs on a background thread.
+    // One compositing overlay stream (rendered to a PNG sequence, fed to ffmpeg).
+    enum class LayerKind { Sim3D, Sim2D, Timeline };
+    struct ExportLayer {
+        LayerKind kind;
+        int w = 0, h = 0;
+        std::string tempDir;    // its own frame directory
+        std::string filePrefix; // e.g. "frame_" / "tl_"
+        std::vector<uint8_t> pixels;
+    };
+
+    // Incremental frame-render job. Each enabled layer's frame is rendered a few
+    // per UI frame on the main thread (GL), then ffmpeg runs on a background thread.
     bool renderingFrames = false;
     int jobFrame = 0, jobFrameCount = 0;
-    int jobW = 0, jobH = 0;
     float jobStart = 0.f, jobFps = 15.f;
-    std::string jobTempDir;
+    std::vector<ExportLayer> jobLayers;
     std::vector<std::string> jobArgs;
-    std::vector<uint8_t> jobPixels;
 
     void startExport(const std::string& outputPath, float start, float end) noexcept;
-    void spawnFfmpeg(std::vector<std::string> args, std::string tempDir) noexcept;
+    void spawnFfmpeg(std::vector<std::string> args, std::vector<std::string> tempDirs) noexcept;
 
 public:
     static constexpr const char* WindowId = "###PREVIEW_EXPORT";
