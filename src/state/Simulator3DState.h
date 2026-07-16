@@ -38,6 +38,8 @@ struct Simulator3DState
     bool showGrid = true;
     bool showGizmo = true;
     bool showStrokeLine = false; // vertical line from the cylinder bottom to the ground (stroke length)
+    bool showHeightText = false;   // draw the stroke position (0..100) under the model
+    float heightTextScale = 1.f;   // readout size as a multiple of the UI font size
     bool litMode = false; // false = fast draw-list box; true = GPU lit mesh (render-to-texture)
     bool overlayMode = false; // render in a floating window over the video (front-locked, no orbit)
 
@@ -77,6 +79,8 @@ REFL_TYPE(Simulator3DState)
     REFL_FIELD(showGrid)
     REFL_FIELD(showGizmo)
     REFL_FIELD(showStrokeLine)
+    REFL_FIELD(showHeightText)
+    REFL_FIELD(heightTextScale)
     REFL_FIELD(litMode)
     REFL_FIELD(overlayMode)
     REFL_FIELD(shaftColor)

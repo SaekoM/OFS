@@ -6,8 +6,11 @@
 #include "OFS_Localization.h"
 #include "OFS_GL.h"
 #include "OFS_Shader.h"
+#include "OFS_ImGui.h"
+#include "OFS_DynamicFontAtlas.h"
 
 #include "imgui.h"
+#include "stb_sprintf.h"
 
 #include "glm/glm.hpp"
 #include "glm/gtc/matrix_transform.hpp"
@@ -425,6 +428,7 @@ Pose3D Simulator3D::samplePose(const std::vector<std::shared_ptr<Funscript>>& sc
 
         if (axis.empty()) {
             pose.ty = dir(st.invertStroke) * st.translateRange; pose.hasStroke = true;
+            pose.stroke01 = v; // report the funscript position, not the display transform
         } else if (axis == "surge") {
             pose.tz = dir(st.invertSurge) * st.translateRange * 0.5f; pose.hasSurge = true;
         } else if (axis == "sway") {
@@ -520,6 +524,16 @@ void Simulator3D::ShowWindow(bool* open, const std::vector<std::shared_ptr<Funsc
         ImGui::Checkbox("Axis gizmo", &st.showGizmo);
         ImGui::SameLine();
         ImGui::Checkbox("Stroke line", &st.showStrokeLine);
+        ImGui::SameLine();
+        ImGui::Checkbox("Height value", &st.showHeightText);
+        OFS::Tooltip("Show the stroke position (0-100) under the model.");
+        if (st.showHeightText) {
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(120.f);
+            if (ImGui::SliderFloat("Size##heightText", &st.heightTextScale, 0.5f, 8.f, "%.1fx"))
+                st.heightTextScale = Util::Clamp(st.heightTextScale, 0.5f, 8.f);
+            OFS::Tooltip("Readout size, relative to the UI font.");
+        }
 
         if (ImGui::Button("Recenter view")) {
             const Simulator3DState def{}; // reset camera to struct defaults
@@ -785,5 +799,22 @@ void Simulator3D::renderCanvas(Simulator3DState& st, const Pose3D& pose,
         ImVec2 ts = ImGui::CalcTextSize(msg);
         dl->AddText(ImVec2(center.x - ts.x * 0.5f, center.y - ts.y * 0.5f),
                     IM_COL32(0xAA, 0xAA, 0xAA, 0xFF), msg);
+    }
+
+    // ---- Stroke position readout, centered under the model ----
+    if (st.showHeightText && pose.hasStroke) {
+        char b[8];
+        stbsp_snprintf(b, sizeof(b), "%d", (int)std::lround(pose.stroke01 * 100.f));
+        const float fontPx = ImGui::GetFontSize() * Util::Clamp(st.heightTextScale, 0.5f, 8.f);
+        // Below the UI size the native font is sharpest; above it, scale down from
+        // the large digits face instead of upscaling the UI font (which goes soft).
+        ImFont* font = ImGui::GetFont();
+        if (OFS_DynFontAtlas::NumberFont && fontPx > ImGui::GetFontSize())
+            font = OFS_DynFontAtlas::NumberFont;
+        const ImVec2 ts = font->CalcTextSizeA(fontPx, FLT_MAX, 0.f, b);
+        const ImVec2 tp(origin.x + (size.x - ts.x) * 0.5f, origin.y + size.y - ts.y - 4.f);
+        const float sh = Util::Max(1.f, fontPx * 0.06f); // shadow offset scales with the text
+        dl->AddText(font, fontPx, ImVec2(tp.x + sh, tp.y + sh), IM_COL32(0, 0, 0, 0xC0), b);
+        dl->AddText(font, fontPx, tp, IM_COL32(0xFF, 0xFF, 0xFF, 0xFF), b);
     }
 }

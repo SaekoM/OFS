@@ -13,6 +13,7 @@ struct Pose3D {
     float tx = 0.f, ty = 0.f, tz = 0.f;    // translation (sway, up, surge)
     float rx = 0.f, ry = 0.f, rz = 0.f;    // rotation radians (pitch X, twist Y, roll Z)
     float suck = 0.f, vib = 0.f, pump = 0.f; // 0..1 (pump centered at 0.5)
+    float stroke01 = 0.5f;                 // raw stroke axis value 0..1 (pre invert/range)
     bool hasStroke = false, hasSurge = false, hasSway = false;
     bool hasTwist = false, hasRoll = false, hasPitch = false;
     bool hasSuck = false, hasVib = false, hasPump = false;
