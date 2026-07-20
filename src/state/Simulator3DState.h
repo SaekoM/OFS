@@ -21,10 +21,12 @@ struct Simulator3DState
     float camDist = 4.5f;
 
     // Axis -> motion mapping ranges
+    // Ranges match the reference OFS_Simulator3D (OpenFunscripter/OFS_Simulator3D):
+    // stroke Lerp(-1,1), surge/sway Lerp(-0.5,0.5), twist +/-120, roll & pitch +/-45.
     float translateRange = 1.0f; // world units (stroke; surge/sway are half this)
-    float twistRange = 135.f;    // degrees (matches original simulator)
-    float rollRange = 30.f;      // degrees (matches original simulator)
-    float pitchRange = 30.f;     // degrees (matches original simulator)
+    float twistRange = 120.f;    // degrees
+    float rollRange = 45.f;      // degrees
+    float pitchRange = 45.f;     // degrees
 
     // Per-axis direction inversion (for matching hardware / convention)
     bool invertStroke = false;

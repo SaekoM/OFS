@@ -211,9 +211,14 @@ static void appendCapsuleY(std::vector<float>& m, const glm::vec3& c, float r, f
 // deform + vib jitter). Shared by the interactive canvas and the export render.
 static glm::mat4 poseModel(const Pose3D& pose, float jitterTime) noexcept
 {
-    glm::mat4 rot = glm::rotate(glm::mat4(1.f), pose.ry, glm::vec3(0.f, 1.f, 0.f))
+    // Matches the reference OFS_Simulator3D, which does:
+    //   GlobalRotate(Right, pitch); GlobalRotate(Forward, roll); RotateObjectLocal(Up, twist)
+    // Godot's GlobalRotate pre-multiplies and RotateObjectLocal post-multiplies, so the
+    // composition is Rz(roll) * Rx(pitch) * Ry(twist): roll outermost, twist local/innermost
+    // (twist spins the receiver about its own shaft rather than about world up).
+    glm::mat4 rot = glm::rotate(glm::mat4(1.f), pose.rz, glm::vec3(0.f, 0.f, 1.f))
         * glm::rotate(glm::mat4(1.f), pose.rx, glm::vec3(1.f, 0.f, 0.f))
-        * glm::rotate(glm::mat4(1.f), pose.rz, glm::vec3(0.f, 0.f, 1.f));
+        * glm::rotate(glm::mat4(1.f), pose.ry, glm::vec3(0.f, 1.f, 0.f));
     glm::vec3 auxScale(1.f);
     if (pose.hasSuck) { const float s = 1.f - pose.suck * 0.35f; auxScale.x *= s; auxScale.z *= s; }
     if (pose.hasPump) { auxScale.y *= 1.f + (pose.pump * 2.f - 1.f) * 0.2f; }
@@ -430,9 +435,11 @@ Pose3D Simulator3D::samplePose(const std::vector<std::shared_ptr<Funscript>>& sc
             pose.ty = dir(st.invertStroke) * st.translateRange; pose.hasStroke = true;
             pose.stroke01 = v; // report the funscript position, not the display transform
         } else if (axis == "surge") {
-            pose.tz = dir(st.invertSurge) * st.translateRange * 0.5f; pose.hasSurge = true;
+            // Axis assignment matches the reference OFS_Simulator3D, which drives
+            // X from surge (Lerp(-0.5, 0.5)) and Z from sway (Lerp(0.5, -0.5)).
+            pose.tx = dir(st.invertSurge) * st.translateRange * 0.5f; pose.hasSurge = true;
         } else if (axis == "sway") {
-            pose.tx = -dir(st.invertSway) * st.translateRange * 0.5f; pose.hasSway = true;
+            pose.tz = -dir(st.invertSway) * st.translateRange * 0.5f; pose.hasSway = true;
         } else if (axis == "twist") {
             pose.ry = glm::radians(dir(st.invertTwist) * st.twistRange); pose.hasTwist = true;
         } else if (axis == "roll") {
@@ -541,6 +548,15 @@ void Simulator3D::ShowWindow(bool* open, const std::vector<std::shared_ptr<Funsc
             st.camPitch = def.camPitch;
             st.camDist = def.camDist;
         }
+        ImGui::SameLine();
+        if (ImGui::Button("Reset ranges")) {
+            const Simulator3DState def{}; // reference-matching motion ranges
+            st.translateRange = def.translateRange;
+            st.twistRange = def.twistRange;
+            st.rollRange = def.rollRange;
+            st.pitchRange = def.pitchRange;
+        }
+        OFS::Tooltip("Restore stroke/twist/roll/pitch ranges to the reference simulator's values.");
 
         // Range controls: slider for feel + editable box for exact values.
         auto rangeCtrl = [](const char* label, float* v, float mn, float mx) {
