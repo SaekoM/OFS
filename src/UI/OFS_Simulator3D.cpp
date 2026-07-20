@@ -435,11 +435,11 @@ Pose3D Simulator3D::samplePose(const std::vector<std::shared_ptr<Funscript>>& sc
             pose.ty = dir(st.invertStroke) * st.translateRange; pose.hasStroke = true;
             pose.stroke01 = v; // report the funscript position, not the display transform
         } else if (axis == "surge") {
-            // Axis assignment matches the reference OFS_Simulator3D, which drives
-            // X from surge (Lerp(-0.5, 0.5)) and Z from sway (Lerp(0.5, -0.5)).
-            pose.tx = dir(st.invertSurge) * st.translateRange * 0.5f; pose.hasSurge = true;
+            // Surge drives Z (toward/away from the default camera), negated like
+            // sway/roll/pitch so it moves with the same handedness as the other axes.
+            pose.tz = -dir(st.invertSurge) * st.translateRange * 0.5f; pose.hasSurge = true;
         } else if (axis == "sway") {
-            pose.tz = -dir(st.invertSway) * st.translateRange * 0.5f; pose.hasSway = true;
+            pose.tx = -dir(st.invertSway) * st.translateRange * 0.5f; pose.hasSway = true;
         } else if (axis == "twist") {
             pose.ry = glm::radians(dir(st.invertTwist) * st.twistRange); pose.hasTwist = true;
         } else if (axis == "roll") {
