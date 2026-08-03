@@ -17,7 +17,7 @@
 void OFS_TimelineRaster::DrawInto(ImDrawList* dl, const ImVec2& pos, const ImVec2& size,
                                   const std::vector<std::shared_ptr<Funscript>>& scripts,
                                   int activeIdx, float time, float visibleTime,
-                                  bool showHeightLines, bool allScripts) noexcept
+                                  bool showHeightLines, bool showLabels, bool allScripts) noexcept
 {
     if (size.x < 2.f || size.y < 2.f || visibleTime <= 0.f) return;
 
@@ -95,7 +95,7 @@ void OFS_TimelineRaster::DrawInto(ImDrawList* dl, const ImVec2& pos, const ImVec
         // Axis label (script title) so multi-axis strips are legible. Use an
         // explicit size (the offscreen font is loaded large) proportional to the lane.
         const auto& title = script->Title();
-        if (!title.empty()) {
+        if (showLabels && !title.empty()) {
             ImFont* lf = ImGui::GetFont();
             const float labelPx = Util::Clamp(laneH * 0.30f, 9.f, 20.f);
             const ImVec2 tp(laneMin.x + 4.f, laneMin.y + 2.f);
@@ -189,7 +189,7 @@ namespace
 
 bool OFS_TimelineRaster::Render(const std::vector<std::shared_ptr<Funscript>>& scripts,
                                 int activeIdx, float time, float visibleTime,
-                                int w, int h, bool showHeightLines, bool allScripts,
+                                int w, int h, bool showHeightLines, bool showLabels, bool allScripts,
                                 std::vector<uint8_t>& outRGBA) noexcept
 {
     if (w < 1 || h < 1 || visibleTime <= 0.f) return false;
@@ -214,7 +214,7 @@ bool OFS_TimelineRaster::Render(const std::vector<std::shared_ptr<Funscript>>& s
 
     ImDrawList* dl = ImGui::GetForegroundDrawList(ImGui::GetMainViewport());
     DrawInto(dl, ImVec2(0.f, 0.f), ImVec2((float)w, (float)h), scripts, activeIdx, time, visibleTime,
-             showHeightLines, allScripts);
+             showHeightLines, showLabels, allScripts);
 
     // Render the draw list into our offscreen framebuffer.
     glBindFramebuffer(GL_FRAMEBUFFER, g_fbo);

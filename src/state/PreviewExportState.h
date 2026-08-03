@@ -28,6 +28,7 @@ struct PreviewExportState
     float timelineVisibleTime = 10.f;    // seconds of script shown across the strip
     float timelineHeightFrac = 0.22f;    // strip height as a fraction of video height
     bool timelineShowHeightLines = true; // draw the 10..90% reference grid
+    bool timelineShowLabels = true;      // draw the axis name (script title) on each lane
     bool timelineAllScripts = false;     // stack all enabled scripts (multi-axis)
 
     // Pillarbox/letterbox the video region to 16:9 with black bars.
@@ -56,6 +57,7 @@ REFL_TYPE(PreviewExportState)
     REFL_FIELD(timelineVisibleTime)
     REFL_FIELD(timelineHeightFrac)
     REFL_FIELD(timelineShowHeightLines)
+    REFL_FIELD(timelineShowLabels)
     REFL_FIELD(timelineAllScripts)
     REFL_FIELD(padTo169)
 REFL_END

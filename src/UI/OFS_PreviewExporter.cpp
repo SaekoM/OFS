@@ -372,7 +372,7 @@ void OFS_PreviewExporter::Update() noexcept
             case LayerKind::Timeline:
                 ok = OFS_TimelineRaster::Render(scripts, activeIdx, t, st.timelineVisibleTime,
                                                 L.w, L.h, st.timelineShowHeightLines,
-                                                st.timelineAllScripts, L.pixels);
+                                                st.timelineShowLabels, st.timelineAllScripts, L.pixels);
                 break;
             }
             if (ok && st.simShowHeightText && (L.kind == LayerKind::Sim2D || L.kind == LayerKind::Sim3D)) {
@@ -416,7 +416,8 @@ void OFS_PreviewExporter::ShowWindow(bool* open) noexcept
         char curLabel[32];
         stbsp_snprintf(curLabel, sizeof(curLabel), "%dx%d", widthForHeight(st.resolution, vw, vh), st.resolution);
         if (ImGui::BeginCombo("Resolution", curLabel)) {
-            static const int heights[] = {2160, 1440, 1080, 720, 540, 480, 360, 240};
+            // 90 gives 160x90 for 16:9 sources (thumbnails); 180 -> 320x180.
+            static const int heights[] = {2160, 1440, 1080, 720, 540, 480, 360, 240, 180, 90};
             for (int h : heights) {
                 if (vh > 0 && h > (int)vh) continue; // no upscaling
                 char lbl[32];
@@ -607,6 +608,8 @@ void OFS_PreviewExporter::ShowWindow(bool* open) noexcept
         if (ImGui::SliderFloat("Strip height", &st.timelineHeightFrac, 0.05f, 0.6f, "%.2f"))
             st.timelineHeightFrac = Util::Clamp(st.timelineHeightFrac, 0.05f, 0.6f);
         ImGui::Checkbox("Height lines", &st.timelineShowHeightLines);
+        ImGui::SameLine();
+        ImGui::Checkbox("Axis names", &st.timelineShowLabels);
         ImGui::Checkbox("Include all enabled scripts (multi-axis)", &st.timelineAllScripts);
 
         if (app->LoadedFunscripts().empty()) {
@@ -619,7 +622,7 @@ void OFS_PreviewExporter::ShowWindow(bool* open) noexcept
             OFS_TimelineRaster::DrawInto(ImGui::GetWindowDrawList(), origin, ImVec2(previewW, stripH),
                               app->LoadedFunscripts(), (int)app->LoadedProject->ActiveIdx(),
                               (float)app->player->CurrentTime(), st.timelineVisibleTime,
-                              st.timelineShowHeightLines, st.timelineAllScripts);
+                              st.timelineShowHeightLines, st.timelineShowLabels, st.timelineAllScripts);
             ImGui::Dummy(ImVec2(previewW, stripH));
         }
     }
