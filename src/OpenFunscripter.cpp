@@ -10,6 +10,7 @@
 #include "OFS_Localization.h"
 
 #include "state/OpenFunscripterState.h"
+#include "state/MetadataEditorState.h"
 #include "state/states/VideoplayerWindowState.h"
 #include "state/states/BaseOverlayState.h"
 #include "state/states/ChapterState.h"
@@ -1859,6 +1860,12 @@ void OpenFunscripter::initProject() noexcept
     if (LoadedProject->IsValid()) {
         auto& projectState = LoadedProject->State();
         if (projectState.nudgeMetadata) {
+            // Apply saved default metadata template to new projects (keep detected duration).
+            auto& metaState = FunscriptMetadataState::State(metadataEditor->StateHandle());
+            auto savedDuration = projectState.metadata.duration;
+            projectState.metadata = metaState.defaultMetadata;
+            projectState.metadata.duration = savedDuration;
+
             const auto& prefState = PreferenceState::State(preferences->StateHandle());
             ShowMetadataEditor = prefState.showMetaOnNew;
             projectState.nudgeMetadata = false;
@@ -2216,15 +2223,20 @@ void OpenFunscripter::ShowMainMenuBar() noexcept
                     ImGui::TextDisabled("%s", TR(NO_RECENT_FILES));
                 }
                 auto& recentFiles = ofsState.recentFiles;
-                for (auto it = recentFiles.rbegin(); it != recentFiles.rend(); ++it) {
+                int recentIdx = 0;
+                for (auto it = recentFiles.rbegin(); it != recentFiles.rend(); ++it, ++recentIdx) {
                     auto& recent = *it;
-                    if (ImGui::MenuItem(recent.name.c_str())) {
-                        if (!recent.projectPath.empty()) {
-                            closeWithoutSavingDialog([this, clickedFile = recent.projectPath]() {
-                                openFile(clickedFile);
-                            });
-                            break;
-                        }
+                    // recent.name can be empty (a stored path with no filename). Seed the
+                    // widget ID from the index and give a fallback label so ImGui never
+                    // gets an empty ID (which asserts at the root of the menu popup).
+                    ImGui::PushID(recentIdx);
+                    const bool clicked = ImGui::MenuItem(recent.name.empty() ? "(unnamed)" : recent.name.c_str());
+                    ImGui::PopID();
+                    if (clicked && !recent.projectPath.empty()) {
+                        closeWithoutSavingDialog([this, clickedFile = recent.projectPath]() {
+                            openFile(clickedFile);
+                        });
+                        break;
                     }
                 }
                 ImGui::Separator();
@@ -2309,22 +2321,31 @@ void OpenFunscripter::ShowMainMenuBar() noexcept
                         });
                     return it != app->LoadedFunscripts().end();
                 };
-                auto addNewShortcut = [this, fileAlreadyLoaded](const char* axisExt) noexcept {
-                    if (ImGui::MenuItem(axisExt)) {
-                        std::string newScriptPath;
-                        {
-                            auto root = Util::PathFromString(
-                                LoadedProject->MakePathAbsolute(LoadedFunscripts()[0]->RelativePath()));
-                            root.replace_extension(Util::Format(".%s.funscript", axisExt));
-                            newScriptPath = root.u8string();
-                        }
+                auto addAxisScript = [this, fileAlreadyLoaded](const char* axisExt) noexcept {
+                    std::string newScriptPath;
+                    {
+                        auto root = Util::PathFromString(
+                            LoadedProject->MakePathAbsolute(LoadedFunscripts()[0]->RelativePath()));
+                        root.replace_extension(Util::Format(".%s.funscript", axisExt));
+                        newScriptPath = root.u8string();
+                    }
 
-                        if (!fileAlreadyLoaded(newScriptPath)) {
-                            LoadedProject->AddFunscript(newScriptPath);
-                        }
+                    if (!fileAlreadyLoaded(newScriptPath)) {
+                        LoadedProject->AddFunscript(newScriptPath);
+                    }
+                };
+                auto addNewShortcut = [addAxisScript](const char* axisExt) noexcept {
+                    if (ImGui::MenuItem(axisExt)) {
+                        addAxisScript(axisExt);
                     }
                 };
                 if (ImGui::BeginMenu(TR(ADD_SHORTCUTS))) {
+                    // The five positional axes at once (skips any already loaded).
+                    static const char* multiAxes[] = { "surge", "sway", "twist", "roll", "pitch" };
+                    if (ImGui::MenuItem("All (surge, sway, twist, roll, pitch)")) {
+                        for (auto axis : multiAxes) addAxisScript(axis);
+                    }
+                    ImGui::Separator();
                     for (auto axis : Funscript::AxisNames) {
                         addNewShortcut(axis);
                     }
