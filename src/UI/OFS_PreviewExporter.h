@@ -36,15 +36,22 @@ private:
         std::vector<uint8_t> pixels;
     };
 
+    // A section of the source to export: [start, start+dur]. A normal export is one
+    // segment; a compilation is several spread across the media, concatenated.
+    struct Segment { float start; float dur; };
+
     // Incremental frame-render job. Each enabled layer's frame is rendered a few
     // per UI frame on the main thread (GL), then ffmpeg runs on a background thread.
+    // Output frame k maps to a source time within one segment (see Update()).
     bool renderingFrames = false;
     int jobFrame = 0, jobFrameCount = 0;
-    float jobStart = 0.f, jobFps = 15.f;
+    float jobFps = 15.f;
+    std::vector<float> jobSegStarts;   // source start time of each segment
+    int jobFramesPerSeg = 0;           // output frames per segment (equal durations)
     std::vector<ExportLayer> jobLayers;
     std::vector<std::string> jobArgs;
 
-    void startExport(const std::string& outputPath, float start, float end) noexcept;
+    void startExport(const std::string& outputPath, const std::vector<Segment>& segments) noexcept;
     void spawnFfmpeg(std::vector<std::string> args, std::vector<std::string> tempDirs) noexcept;
 
 public:

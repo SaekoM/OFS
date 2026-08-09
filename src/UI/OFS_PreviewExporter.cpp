@@ -192,13 +192,18 @@ void OFS_PreviewExporter::OpenForChapter(float start, float end) noexcept
     endEditing = false;
 }
 
-void OFS_PreviewExporter::startExport(const std::string& outputPath, float start, float end) noexcept
+void OFS_PreviewExporter::startExport(const std::string& outputPath, const std::vector<Segment>& segments) noexcept
 {
     if (exporting.load() || renderingFrames) return;
+    if (segments.empty()) return;
+    for (auto& s : segments) if (s.dur <= 0.f) return;
     auto& st = PreviewExportState::State(stateHandle);
     auto app = OpenFunscripter::ptr;
     const char* videoPath = app->player->VideoPath();
-    if (!videoPath || !*videoPath || end <= start) return;
+    if (!videoPath || !*videoPath) return;
+
+    const int N = (int)segments.size();
+    const bool compilation = N > 1;   // several slices concatenated
 
     const int outH = st.resolution; // height of the video region
     const uint16_t vw = app->player->VideoWidth();
@@ -212,7 +217,8 @@ void OFS_PreviewExporter::startExport(const std::string& outputPath, float start
     const bool doSim = st.overlaySim && haveScript;
     const bool doTimeline = st.overlayTimeline && haveScript;
     const bool needFrames = doSim || doTimeline;
-    const bool useFC = needFrames || st.padTo169; // needs -filter_complex
+    const bool useFC = needFrames || st.padTo169 || compilation; // needs -filter_complex
+    const bool wantAudio = (st.format == 1) && app->player->HasAudio(); // AV1 carries audio
 
     // Timeline strip band height (extends the canvas below the video region).
     int bandH = 0;
@@ -252,16 +258,18 @@ void OFS_PreviewExporter::startExport(const std::string& outputPath, float start
     a.push_back("-y");
     a.push_back("-hide_banner");
     a.push_back("-loglevel"); a.push_back("error");
-    // -ss and -t must both be INPUT options on the video (before -i). When extra
-    // overlay inputs follow, a -t placed after -i video would bind to those inputs
-    // instead of trimming the video -> the whole clip would export.
-    stbsp_snprintf(buf, sizeof(buf), "%.3f", start);       a.push_back("-ss"); a.push_back(buf);
-    stbsp_snprintf(buf, sizeof(buf), "%.3f", end - start); a.push_back("-t"); a.push_back(buf);
-    a.push_back("-i"); a.push_back(videoPath);
+    // One fast-seeked video input per segment. -ss and -t must both be INPUT options
+    // (before -i); a -t after -i would bind to a following input instead of trimming.
+    for (auto& s : segments) {
+        stbsp_snprintf(buf, sizeof(buf), "%.3f", s.start); a.push_back("-ss"); a.push_back(buf);
+        stbsp_snprintf(buf, sizeof(buf), "%.3f", s.dur);   a.push_back("-t");  a.push_back(buf);
+        a.push_back("-i"); a.push_back(videoPath);
+    }
 
     if (useFC) {
-        // Add a framerate-tagged image-sequence input for each overlay layer.
-        int simInput = -1, tlInput = -1, nextInput = 1;
+        // Add a framerate-tagged image-sequence input for each overlay layer (after
+        // the N video inputs, so overlay input indices start at N).
+        int simInput = -1, tlInput = -1, nextInput = N;
         for (auto& L : layers) {
             stbsp_snprintf(buf, sizeof(buf), "%d", st.fps); a.push_back("-framerate"); a.push_back(buf);
             a.push_back("-i");
@@ -270,8 +278,16 @@ void OFS_PreviewExporter::startExport(const std::string& outputPath, float start
             ++nextInput;
         }
 
-        // Base: fps -> scale (optionally 16:9 pillarbox) -> optionally extend canvas below.
-        std::string fg = "[0:v]fps=" + std::to_string(st.fps) + ",";
+        // Concatenate the segment videos first (compilation), then fps/scale/pad.
+        std::string fg;
+        std::string base = "[0:v]";
+        if (compilation) {
+            for (int i = 0; i < N; ++i) { stbsp_snprintf(buf, sizeof(buf), "[%d:v]", i); fg += buf; }
+            stbsp_snprintf(buf, sizeof(buf), "concat=n=%d:v=1[cat];", N); fg += buf;
+            base = "[cat]";
+        }
+        fg += base;
+        fg += "fps=" + std::to_string(st.fps) + ",";
         if (st.padTo169) {
             stbsp_snprintf(buf, sizeof(buf),
                 "scale=%d:%d:force_original_aspect_ratio=decrease,pad=%d:%d:(ow-iw)/2:(oh-ih)/2:black",
@@ -291,10 +307,21 @@ void OFS_PreviewExporter::startExport(const std::string& outputPath, float start
             stbsp_snprintf(buf, sizeof(buf), ";%s[%d:v]overlay=0:%d[outv]", last.c_str(), tlInput, outH);
             fg += buf; last = "[outv]";
         }
+        // Audio (AV1 only): concat each segment's audio for a compilation, else map source.
+        std::string audioLabel;
+        if (wantAudio && compilation) {
+            fg += ";";
+            for (int i = 0; i < N; ++i) { stbsp_snprintf(buf, sizeof(buf), "[%d:a]", i); fg += buf; }
+            stbsp_snprintf(buf, sizeof(buf), "concat=n=%d:v=0:a=1[outa]", N); fg += buf;
+            audioLabel = "[outa]";
+        }
         a.push_back("-filter_complex"); a.push_back(fg);
         // filter_complex disables auto stream selection, so map explicitly.
         a.push_back("-map"); a.push_back(last);
-        if (st.format == 1) { a.push_back("-map"); a.push_back("0:a?"); } // source audio for AV1
+        if (wantAudio) {
+            a.push_back("-map");
+            a.push_back(compilation ? audioLabel : std::string("0:a?"));
+        }
     } else {
         stbsp_snprintf(buf, sizeof(buf), "fps=%d", st.fps);
         a.push_back("-filter:v"); a.push_back(buf);
@@ -325,12 +352,15 @@ void OFS_PreviewExporter::startExport(const std::string& outputPath, float start
 
     if (needFrames) {
         // Kick off the incremental frame-render job; ffmpeg spawns when it finishes.
-        int frames = (int)std::lround((double)(end - start) * st.fps);
-        if (frames < 1) frames = 1;
+        // Segments share one duration, so frames-per-segment is uniform.
+        int framesPerSeg = (int)std::lround((double)segments[0].dur * st.fps);
+        if (framesPerSeg < 1) framesPerSeg = 1;
         jobFrame = 0;
-        jobFrameCount = frames;
-        jobStart = start;
+        jobFramesPerSeg = framesPerSeg;
+        jobFrameCount = framesPerSeg * N;
         jobFps = (float)st.fps;
+        jobSegStarts.clear();
+        for (auto& s : segments) jobSegStarts.push_back(s.start);
         jobLayers = std::move(layers);
         jobArgs = std::move(a);
         renderingFrames = true;
@@ -355,7 +385,11 @@ void OFS_PreviewExporter::Update() noexcept
     constexpr int kBatch = 4;
     std::vector<uint8_t> textOverlay; // reused scratch for baked height text
     for (int k = 0; k < kBatch && jobFrame < jobFrameCount; ++k, ++jobFrame) {
-        const float t = jobStart + (float)jobFrame / jobFps;
+        // Output frame -> source time within its segment (segments are concatenated).
+        int seg = jobFramesPerSeg > 0 ? (jobFrame / jobFramesPerSeg) : 0;
+        if (seg >= (int)jobSegStarts.size()) seg = (int)jobSegStarts.size() - 1;
+        const int localFrame = jobFrame - seg * jobFramesPerSeg;
+        const float t = jobSegStarts[seg] + (float)localFrame / jobFps;
         char name[48];
         for (auto& L : jobLayers) {
             bool ok = true;
@@ -470,7 +504,22 @@ void OFS_PreviewExporter::ShowWindow(bool* open) noexcept
     timeField("End (h:m:s.ms)", endTime, endStr, endEditing);
     const float rStart = startTime;
     const float rEnd = endTime;
-    const bool haveRange = true;
+
+    // ---- Compilation: several slices spread evenly across the whole video ----
+    ImGui::Separator();
+    ImGui::Checkbox("Compilation (slices across the whole video)", &st.compilation);
+    if (st.compilation) {
+        if (ImGui::SliderInt("Slices", &st.compSlices, 2, 30))
+            st.compSlices = Util::Clamp(st.compSlices, 1, 100);
+        if (ImGui::SliderFloat("Slice duration", &st.compSliceDur, 0.5f, 10.f, "%.1f s"))
+            st.compSliceDur = Util::Clamp(st.compSliceDur, 0.1f, 60.f);
+        ImGui::Text("Output length: %.1f s  (%d \xC3\x97 %.1f s)",
+                    st.compSlices * st.compSliceDur, st.compSlices, st.compSliceDur);
+        if ((float)duration > 0.f && st.compSlices * st.compSliceDur > (float)duration)
+            ImGui::TextColored(ImVec4(1.f, 0.6f, 0.3f, 1.f), "Slices exceed the video length \xE2\x80\x94 they will overlap.");
+        ImGui::TextDisabled("Ignores the Start/End range above.");
+    }
+    const bool haveRange = st.compilation ? (duration > 0.0) : (rEnd > rStart);
 
     // ---- Overlay the simulator on the video (draggable live preview) ----
     ImGui::Separator();
@@ -630,16 +679,32 @@ void OFS_PreviewExporter::ShowWindow(bool* open) noexcept
     ImGui::Separator();
     const char* videoPath = app->player->VideoPath();
     const bool busy = exporting.load() || renderingFrames;
-    const bool canExport = !busy && haveRange && rEnd > rStart && videoPath && *videoPath;
+    const bool canExport = !busy && haveRange && videoPath && *videoPath;
 
     ImGui::BeginDisabled(!canExport);
     if (ImGui::Button("Export\xE2\x80\xA6")) {
-        const char* filter = st.format == 0 ? "*.webp" : "*.mp4";
+        // Build the segment list: one slice for a normal export, or N evenly-spread
+        // slices (each centered in its 1/N band of the timeline) for a compilation.
+        std::vector<Segment> segments;
+        if (st.compilation) {
+            const float T = (float)duration;
+            const int n = Util::Clamp(st.compSlices, 1, 100);
+            const float D = Util::Clamp(st.compSliceDur, 0.1f, Util::Max(0.1f, T));
+            const float band = T / (float)n;
+            for (int i = 0; i < n; ++i) {
+                float s = (float)i * band + (band - D) * 0.5f;
+                s = Util::Clamp(s, 0.f, Util::Max(0.f, T - D));
+                segments.push_back({ s, D });
+            }
+        } else {
+            segments.push_back({ rStart, rEnd - rStart });
+        }
         const char* ext = st.format == 0 ? ".webp" : ".mp4";
-        std::string defaultName = std::string("preview") + ext;
+        const char* filter = st.format == 0 ? "*.webp" : "*.mp4";
+        std::string defaultName = std::string(st.compilation ? "compilation" : "preview") + ext;
         Util::SaveFileDialog("Export animated preview", defaultName,
-            [this, rStart, rEnd](Util::FileDialogResult& result) {
-                if (!result.files.empty()) startExport(result.files[0], rStart, rEnd);
+            [this, segments](Util::FileDialogResult& result) {
+                if (!result.files.empty()) startExport(result.files[0], segments);
             },
             { filter });
     }

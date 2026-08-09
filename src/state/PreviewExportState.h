@@ -34,6 +34,11 @@ struct PreviewExportState
     // Pillarbox/letterbox the video region to 16:9 with black bars.
     bool padTo169 = false;
 
+    // Compilation: sample several evenly-spread slices and concatenate them.
+    bool compilation = false;
+    int32_t compSlices = 6;      // number of slices
+    float compSliceDur = 2.f;    // duration of each slice in seconds
+
     inline static PreviewExportState& State(uint32_t stateHandle) noexcept
     {
         return OFS_AppState<PreviewExportState>(stateHandle).Get();
@@ -60,4 +65,7 @@ REFL_TYPE(PreviewExportState)
     REFL_FIELD(timelineShowLabels)
     REFL_FIELD(timelineAllScripts)
     REFL_FIELD(padTo169)
+    REFL_FIELD(compilation)
+    REFL_FIELD(compSlices)
+    REFL_FIELD(compSliceDur)
 REFL_END
