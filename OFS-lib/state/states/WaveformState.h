@@ -5,6 +5,7 @@
 
 #include <vector>
 #include <cstdint>
+#include <string>
 
 #include "sdefl.h"
 #include "sinfl.h"
@@ -12,9 +13,20 @@
 struct WaveformState
 {
     static constexpr auto StateName = "WaveformState";
+    // Bump when the meaning of the samples changes, so older caches get rebuilt.
+    // 1: peak level per 128-sample slice (before: average level per 300 samples).
+    static constexpr int32_t CurrentFormatVersion = 1;
+
     std::string Filename;
     std::vector<uint8_t> BinSamples;
     size_t UncompressedSize = 0;
+    int32_t FormatVersion = 0; // missing in projects saved before versioning
+
+    // Whether this cache holds a waveform for `path` in the current format.
+    inline bool IsCurrentFor(const std::string& path) const noexcept
+    {
+        return Filename == path && FormatVersion == CurrentFormatVersion && UncompressedSize > 0;
+    }
 
     std::vector<float> GetSamples() noexcept
     {
@@ -57,6 +69,7 @@ struct WaveformState
         auto compressedSize = sdeflate(&ctx, compressedBin.data(), BinSamples.data(), BinSamples.size(), 8);
         compressedBin.resize(compressedSize);
         BinSamples = std::move(compressedBin);
+        FormatVersion = CurrentFormatVersion;
     }
 
     inline static WaveformState& StaticStateSlow() noexcept
@@ -71,4 +84,5 @@ REFL_TYPE(WaveformState)
     REFL_FIELD(Filename)
     REFL_FIELD(BinSamples)
     REFL_FIELD(UncompressedSize)
+    REFL_FIELD(FormatVersion)
 REFL_END

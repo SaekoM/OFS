@@ -9,51 +9,42 @@
 
 #include "subprocess.h"
 
+#include <algorithm>
+#include <cmath>
+
 bool OFS_Waveform::LoadFlac(const std::string& output) noexcept
 {
 	drflac* flac = drflac_open_file(output.c_str(), NULL);
 	if (!flac) return false;
 
-	std::vector<drflac_int16> ChunkSamples; ChunkSamples.resize(48000);
-	constexpr int SamplesPerLine = 300; 
+	// One value per slice: the loudest sample in it. Peaks keep drum hits sharp,
+	// where an average would round them off. ~2.9 ms per slice at 44.1 kHz.
+	// Keep in sync with WaveformState::CurrentFormatVersion.
+	constexpr int SamplesPerSlice = 128;
+	std::vector<drflac_int16> chunk(SamplesPerSlice * 375); // whole slices per read
 
-	float minSample = 0.f;
-	float maxSample = 0.f;
-
-	uint32_t sampleCount = 0;
-	float avgSample = 0.f;
 	Clear();
-	samples.reserve(flac->totalPCMFrameCount / SamplesPerLine);
-	while ((sampleCount = drflac_read_pcm_frames_s16(flac, ChunkSamples.size(), ChunkSamples.data())) > 0) {
-		for (int sampleIdx = 0; sampleIdx < sampleCount; sampleIdx += SamplesPerLine) {
-			int samplesInThisLine = std::min(SamplesPerLine, (int)sampleCount - sampleIdx);
-			for (int i = 0; i < samplesInThisLine; i += 1) {
-				drflac_int16 sample = ChunkSamples[sampleIdx + i];
-				sample = std::abs(sample);
-				auto floatSample = sample / 32768.f;
-				avgSample += floatSample;
+	samples.reserve(flac->totalPCMFrameCount / SamplesPerSlice + 1);
+	float loudestPeak = 0.f;
+	uint64_t chunkSize = 0;
+	while ((chunkSize = drflac_read_pcm_frames_s16(flac, chunk.size(), chunk.data())) > 0) {
+		for (uint64_t sliceStart = 0; sliceStart < chunkSize; sliceStart += SamplesPerSlice) {
+			const uint64_t sliceEnd = std::min<uint64_t>(sliceStart + SamplesPerSlice, chunkSize);
+			float peak = 0.f;
+			for (uint64_t i = sliceStart; i < sliceEnd; i += 1) {
+				peak = Util::Max(peak, std::abs((float)chunk[i]) / 32768.f);
 			}
-			avgSample /= (float)SamplesPerLine;
-			minSample = Util::Min(minSample, avgSample);
-			maxSample = Util::Max(maxSample, avgSample);
-			samples.emplace_back(avgSample);
-			avgSample = 0.f;
+			loudestPeak = Util::Max(loudestPeak, peak);
+			samples.emplace_back(peak);
 		}
 	}
 	drflac_close(flac);
 	samples.shrink_to_fit();
 
-	if(std::abs(minSample) > std::abs(maxSample)) {
-		maxSample = std::abs(minSample);
+	// Scale so the loudest peak fills the lane (values stay in 0..1).
+	if (loudestPeak > 0.f) {
+		for (auto& sample : samples) sample /= loudestPeak;
 	}
-	else {
-		minSample = -maxSample;
-	}
-
-	for(auto& sample : samples) {
-		sample = Util::MapRange(sample, minSample, maxSample, -1.f, 1.f);
-	}
-
 	return true;
 }
 
@@ -129,7 +120,8 @@ void OFS_WaveformLOD::Update(const OverlayDrawingCtx& ctx) noexcept
 
 	float visibleSampleCountF = endIndexF - startIndexF;
 
-	const float desiredSamples = ctx.canvasSize.x/3.f;
+	// One value per screen pixel; fewer would get smoothed across and blur the outline.
+	const float desiredSamples = ctx.canvasSize.x;
 	const float everyNth = SDL_ceilf(visibleSampleCountF / desiredSamples);
 
 	auto& lineBuf = WaveformLineBuffer;		

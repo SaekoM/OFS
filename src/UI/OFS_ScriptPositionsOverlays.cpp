@@ -4,6 +4,7 @@
 
 #include "state/ProjectState.h"
 #include "state/PatternFillState.h"
+#include "state/states/ChapterState.h"
 #include "audio/OFS_TempoMap.h"
 
 #include "imgui_stdlib.h"
@@ -232,6 +233,50 @@ namespace
         pattern.stepsPerBeat = stepsPerBeat;
         pattern.steps = std::move(reshaped);
     }
+
+    // Chapters the last detection created, so "Undo detection" can remove them
+    // again as long as nobody has edited them since.
+    std::vector<Chapter> ChaptersCreatedByDetection;
+
+    // "128 BPM", or "127.3 BPM" for a tempo that isn't a whole number.
+    std::string BpmLabel(float bpm) noexcept
+    {
+        constexpr float WholeNumberTolerance = 0.05f;
+        char buffer[32];
+        const float rounded = std::round(bpm);
+        if (std::abs(bpm - rounded) < WholeNumberTolerance) stbsp_snprintf(buffer, sizeof(buffer), "%d BPM", (int)rounded);
+        else stbsp_snprintf(buffer, sizeof(buffer), "%.1f BPM", bpm);
+        return buffer;
+    }
+
+    // One chapter per tempo section, named after its tempo. Each ends just before
+    // the next one starts: OFS counts chapters sharing a boundary as overlapping.
+    std::vector<Chapter> ChaptersForSections(const std::vector<TempoSection>& sections, double mediaDuration) noexcept
+    {
+        std::vector<Chapter> chapters;
+        for (int i = 0; i < (int)sections.size(); i += 1) {
+            const float start = sections[i].startSeconds;
+            const float end = (float)std::min(TempoMap::SectionEnd(sections, i), mediaDuration);
+            if (end <= start) continue;
+
+            Chapter chapter;
+            chapter.startTime = start;
+            chapter.endTime = i + 1 < (int)sections.size() ? std::nextafter(end, start) : end;
+            chapter.name = BpmLabel(sections[i].bpm);
+            chapter.color = Util::RandomColor(0.65f, 0.70f);
+            chapters.push_back(std::move(chapter));
+        }
+        return chapters;
+    }
+
+    bool SameChapters(const std::vector<Chapter>& a, const std::vector<Chapter>& b) noexcept
+    {
+        if (a.size() != b.size()) return false;
+        for (size_t i = 0; i < a.size(); i += 1) {
+            if (a[i].startTime != b[i].startTime || a[i].endTime != b[i].endTime || a[i].name != b[i].name) return false;
+        }
+        return true;
+    }
 }
 
 TempoOverlay::TempoOverlay(ScriptTimeline* timeline) noexcept
@@ -276,6 +321,21 @@ void TempoOverlay::applyDetectedTempoMap(const std::vector<TempoSection>& detect
     DetectionMessage = map.size() == 1
         ? std::string("Detected 1 section.")
         : "Detected " + std::to_string(map.size()) + " sections.";
+
+    // Name a chapter after each section's tempo, but never touch existing chapters.
+    auto& chapterState = ChapterState::StaticStateSlow();
+    ChaptersCreatedByDetection.clear();
+    if (!chapterState.chapters.empty()) {
+        DetectionMessage += " Existing chapters were left as they are.";
+        return;
+    }
+    chapterState.chapters = ChaptersForSections(map, OpenFunscripter::ptr->player->Duration());
+    if (chapterState.chapters.empty()) return;
+    ChaptersCreatedByDetection = chapterState.chapters;
+    EV::Enqueue<ChapterStateChanged>();
+    DetectionMessage += chapterState.chapters.size() == 1
+        ? std::string(" Added 1 chapter.")
+        : " Added " + std::to_string(chapterState.chapters.size()) + " chapters.";
 }
 
 void TempoOverlay::update() noexcept
@@ -359,6 +419,14 @@ void TempoOverlay::drawDetectionControls() noexcept
             sections() = SectionsBeforeDetection;
             SectionsBeforeDetectionMedia.clear();
             DetectionMessage.clear();
+
+            // Remove the chapters detection added, unless they've been edited since.
+            auto& chapterState = ChapterState::StaticStateSlow();
+            if (!ChaptersCreatedByDetection.empty() && SameChapters(chapterState.chapters, ChaptersCreatedByDetection)) {
+                chapterState.chapters.clear();
+                EV::Enqueue<ChapterStateChanged>();
+            }
+            ChaptersCreatedByDetection.clear();
         }
     }
 

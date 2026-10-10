@@ -99,17 +99,47 @@ void ScriptTimeline::videoLoaded(const VideoLoadedEvent* ev) noexcept
 {
 	if(ev->playerType != VideoplayerType::Main) return;
 	videoPath = ev->videoPath;
+	if (loadCachedWaveform()) return;
+
+	ClearAudioWaveform();
+	// A waveform cached by an older version is in a blurrier format; rebuild it once.
+	if (WaveformState::StaticStateSlow().Filename == videoPath) {
+		startWaveformGeneration();
+	}
+}
+
+bool ScriptTimeline::loadCachedWaveform() noexcept
+{
 	auto& waveCache = WaveformState::StaticStateSlow();
+	if (!waveCache.IsCurrentFor(videoPath)) return false;
+
 	auto samples = waveCache.GetSamples();
-	if(waveCache.Filename == videoPath && !samples.empty())
-	{
-		Wave.data.SetSamples(std::move(samples));
-		ShowAudioWaveform = true;
-	}
-	else 
-	{
-		ClearAudioWaveform();
-	}
+	if (samples.empty()) return false;
+	Wave.data.SetSamples(std::move(samples));
+	ShowAudioWaveform = true;
+	return true;
+}
+
+void ScriptTimeline::startWaveformGeneration() noexcept
+{
+	if (Wave.data.BusyGenerating() || videoPath.empty()) return;
+	ShowAudioWaveform = false; // switched back on when processing finishes
+
+	auto generate = [](void* userData) -> int {
+		auto& timeline = *((ScriptTimeline*)userData);
+		auto ffmpegPath = Util::FfmpegPath();
+		auto outputPath = Util::Prefpath("tmp");
+		if (!Util::CreateDirectories(outputPath)) {
+			return 0;
+		}
+
+		outputPath = (Util::PathFromString(outputPath) / "audio.flac").u8string();
+		timeline.Wave.data.GenerateAndLoadFlac(ffmpegPath.u8string(), timeline.videoPath, outputPath);
+		EV::Enqueue<WaveformProcessingFinishedEvent>();
+		return 0;
+	};
+	auto handle = SDL_CreateThread(generate, "OFS_GenWaveform", this);
+	SDL_DetachThread(handle);
 }
 
 void ScriptTimeline::handleSelectionScrolling(const OverlayDrawingCtx& ctx) noexcept
@@ -461,20 +491,6 @@ void ScriptTimeline::ShowScriptPositions(
 				ImGui::EndMenu();
 			}
 
-			auto updateAudioWaveformThread = [](void* userData) -> int {
-				auto& ctx = *((ScriptTimeline*)userData);
-				std::error_code ec;
-				auto ffmpegPath = Util::FfmpegPath();
-				auto outputPath = Util::Prefpath("tmp");
-				if (!Util::CreateDirectories(outputPath)) {
-					return 0;
-				}
-				
-				outputPath = (Util::PathFromString(outputPath) / "audio.flac").u8string();
-				bool succ = ctx.Wave.data.GenerateAndLoadFlac(ffmpegPath.u8string(), ctx.videoPath, outputPath);
-				EV::Enqueue<WaveformProcessingFinishedEvent>();
-				return 0;
-			};
 			if (ImGui::BeginMenu(TR_ID("WAVEFORM", Tr::WAVEFORM))) {
 				if(ImGui::BeginMenu(TR_ID("SETTINGS", Tr::SETTINGS))) {
 					ImGui::SetNextItemWidth(ImGui::GetFontSize()*5.f);
@@ -490,21 +506,8 @@ void ScriptTimeline::ShowScriptPositions(
 					OFS::Spinner("##AudioSpin", ImGui::GetFontSize() / 3.f, 4.f, ImGui::GetColorU32(ImGuiCol_TabActive));
 				}
 				else if(ImGui::MenuItem(TR(UPDATE_WAVEFORM), NULL, false, !Wave.data.BusyGenerating() && !videoPath.empty())) {
-					if (!Wave.data.BusyGenerating()) {
-						ShowAudioWaveform = false; // gets switched true after processing
-
-						auto& waveCache = WaveformState::StaticStateSlow();
-						auto samples = waveCache.GetSamples();
-						if(waveCache.Filename == videoPath && !samples.empty())
-						{
-							Wave.data.SetSamples(std::move(samples));
-							ShowAudioWaveform = true;
-						}
-						else 
-						{
-							auto handle = SDL_CreateThread(updateAudioWaveformThread, "OFS_GenWaveform", this);
-							SDL_DetachThread(handle);
-						}
+					if (!Wave.data.BusyGenerating() && !loadCachedWaveform()) {
+						startWaveformGeneration();
 					}
 				}
 				ImGui::EndMenu();

@@ -177,10 +177,13 @@ private:
 				float padding = (1.f - scaledSample) / 2.f;
 				
 				float normPos = (scaledSample/2.f) - abs(Frag_UV.y - 0.5f);
-				float h1 = step(0.f, normPos);
 				float m1 = smoothstep(lowT, midT, normPos);
 				float l1 = smoothstep(0.f, lowT, normPos);
-				float s1 = smoothstep(-0.01f, 0.00f, normPos);
+
+				// Anti-aliased edge exactly one pixel wide: fwidth is how much normPos
+				// changes per pixel, so coverage ramps from 0 to 1 across the edge pixel.
+				float edgeWidth = max(fwidth(normPos), 1e-5f);
+				float coverage = clamp(normPos / edgeWidth + 0.5f, 0.f, 1.f);
 
 				vec3 highCol = sampleOnATriangle(Color.x + Color.y, Color.x + Color.z);
 				vec3 midCol = sampleOnATriangle(Color.y + Color.z, Color.y + Color.x);
@@ -188,7 +191,7 @@ private:
 
 				vec3 c = mix(highCol, midCol, l1);
 				c = mix(c, lowCol, m1);
-				Out_Color = vec4(c, h1 + s1);
+				Out_Color = vec4(c, coverage);
 			}
 	)";
 

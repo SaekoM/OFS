@@ -34,6 +34,12 @@ private:
 	void updateSelection(const OverlayDrawingCtx& ctx, bool clear) noexcept;
 	void FfmpegAudioProcessingFinished(const WaveformProcessingFinishedEvent* ev) noexcept;
 
+	// Shows the waveform cached in the project, if it is for this video and in the
+	// current format. Returns false when there is nothing usable.
+	bool loadCachedWaveform() noexcept;
+	// Extracts the audio with ffmpeg on a background thread and builds the waveform.
+	void startWaveformGeneration() noexcept;
+
 	std::string videoPath;
 	uint32_t visibleTimeUpdate = 0;
 	float nextVisisbleTime = 5.f;
