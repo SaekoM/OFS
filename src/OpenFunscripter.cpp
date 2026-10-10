@@ -268,6 +268,7 @@ bool OpenFunscripter::Init(int argc, char* argv[])
     simulator3D.Init();
     previewExporter = std::make_unique<OFS_PreviewExporter>();
     previewExporter->Init();
+    beatAnalysis = std::make_unique<OFS_BeatAnalysisJob>();
 
     FunscriptHeatmap::Init();
     extensions = std::make_unique<OFS_LuaExtensions>();
@@ -1772,6 +1773,7 @@ int OpenFunscripter::Run() noexcept
 
 void OpenFunscripter::Shutdown() noexcept
 {
+    beatAnalysis.reset(); // stops a running analysis and its ffmpeg process
     SaveState();
 
     OFS_DynFontAtlas::Shutdown();

@@ -38,7 +38,9 @@ static std::array<Tr, (int32_t)StateType::TOTAL_UNDOSTATE_TYPES> stateTranslatio
     Tr::MOVE_TO_CURRENT_POSITION,
 
     Tr::SIMPLIFY,
-    Tr::LUA_SCRIPT
+    Tr::LUA_SCRIPT,
+    Tr::PATTERN_FILL,
+    Tr::SNAP_TO_GRID
 };
 
 // FIXME: UndoStack and RedoStack should be filtered when scripts are removed / projects change

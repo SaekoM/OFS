@@ -19,6 +19,11 @@ set(OPEN_FUNSCRIPTER_SOURCES
   "UI/OFS_FunscriptMetadataEditor.cpp"
   "UI/OFS_ChapterManager.cpp"
 
+  "audio/OFS_BeatAnalysis.cpp"
+  "audio/OFS_BeatAnalysisJob.cpp"
+  "audio/OFS_PatternFill.cpp"
+  "audio/OFS_TempoMap.cpp"
+
   "api/OFS_WebsocketApi.cpp"
   "api/OFS_WebsocketApiClient.cpp"
   "api/OFS_WebsocketApiEvents.cpp"

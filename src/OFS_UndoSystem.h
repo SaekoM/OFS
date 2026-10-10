@@ -37,6 +37,8 @@ enum StateType : int32_t {
 
     SIMPLIFY = 21,
     CUSTOM_LUA = 22,
+    PATTERN_FILL = 23,
+    SNAP_TO_GRID = 24,
     // add more here & update stateStrings in UndoSystem.cpp
 
 

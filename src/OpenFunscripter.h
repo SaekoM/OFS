@@ -24,6 +24,7 @@
 #include "OFS_VideoplayerWindow.h"
 #include "OFS_WebsocketApi.h"
 #include "OFS_ChapterManager.h"
+#include "audio/OFS_BeatAnalysisJob.h"
 
 #include <memory>
 #include <chrono>
@@ -160,6 +161,8 @@ public:
     std::unique_ptr<OFS_WebsocketApi> webApi;
     std::unique_ptr<OFS_ChapterManager> chapterMgr;
     std::unique_ptr<OFS_PreviewExporter> previewExporter;
+    // Background audio analysis behind Tempo mode's onset lane and tempo detection.
+    std::unique_ptr<OFS_BeatAnalysisJob> beatAnalysis;
 
     std::unique_ptr<OFS_Project> LoadedProject;
 

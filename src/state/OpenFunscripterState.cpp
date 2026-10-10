@@ -9,6 +9,7 @@
 #include "Simulator3DState.h"
 #include "PreviewExportState.h"
 #include "LineColorState.h"
+#include "PatternFillState.h"
 
 void OpenFunscripterState::RegisterAll() noexcept
 {
@@ -23,6 +24,7 @@ void OpenFunscripterState::RegisterAll() noexcept
 	OFS_REGISTER_STATE(Simulator3DState);
 	OFS_REGISTER_STATE(PreviewExportState);
 	OFS_REGISTER_STATE(LineColorState);
+	OFS_REGISTER_STATE(PatternFillState);
 
 	// Project state
 	OFS_REGISTER_STATE(TempoOverlayState);

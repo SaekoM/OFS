@@ -550,3 +550,5 @@ BEGIN,Begin,Begin
 CHAPTER_BINDING_GROUP,Chapters,Chapters
 ACTION_CREATE_BOOKMARK,Create bookmark,Create bookmark
 ACTION_CREATE_CHAPTER,Create chapter,Create chapter
+PATTERN_FILL,Pattern fill,Pattern fill
+SNAP_TO_GRID,Snap to grid,Snap to grid

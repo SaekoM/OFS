@@ -1,7 +1,12 @@
 #pragma once
 #include "ScriptPositionsOverlayMode.h"
 #include "OFS_Localization.h"
+#include "audio/OFS_BeatAnalysisJob.h"
+#include "audio/OFS_PatternFill.h"
 #include <cstdint>
+#include <memory>
+#include <string>
+#include <vector>
 
 
 // ATTENTION: no reordering
@@ -54,8 +59,53 @@ private:
 		Tr::TEMPO_64TH_MEASURES,
 	};
 	uint32_t stateHandle = 0xFFFF'FFFF;
+	uint32_t patternStateHandle = 0xFFFF'FFFF;
+
+	// The most recent fill, so changing the pattern or depth right after it
+	// redoes that fill in place instead of needing another click.
+	struct LastFillInfo
+	{
+		std::weak_ptr<Funscript> script;
+		PatternFill::TimeRange range;
+	};
+
+	// Static so they survive the overlay being recreated on every mode switch.
+	static bool ShowOnsetLane;
+	static bool ApplyDetectionWhenReady; // set by "Detect", applied in update()
+	static std::vector<TempoSection> SectionsBeforeDetection;
+	static std::string SectionsBeforeDetectionMedia; // undo only applies to this media
+	static std::string DetectionMessage;
+	static LastFillInfo LastFill;
+	static std::weak_ptr<Funscript> LastSnapScript;
+	static std::string FillMessage;
+
+	// The project's tempo map; older single-tempo projects are migrated on first use.
+	std::vector<TempoSection>& sections() noexcept;
+	// Spacing of the selected snap, in beats (4 = whole measures, 0.25 = sixteenths).
+	double beatsPerLine() noexcept;
+	void applyDetectedTempoMap(const std::vector<TempoSection>& detected) noexcept;
+
+	// Built-in patterns come first in the picker, then the user's custom ones.
+	const StrokePattern& selectedPattern() noexcept;
+	// The range "Fill" would write to right now; empty (with a reason) if there is none.
+	PatternFill::TimeRange currentFillRange(const char** problem) noexcept;
+	void applyPatternFill(const PatternFill::TimeRange& range) noexcept;
+	void refreshLastFill() noexcept;
+	void applySnap() noexcept;
+	void refreshLastSnap() noexcept;
+
+	void drawDetectionControls() noexcept;
+	void drawSectionEditor() noexcept;
+	void drawSectionList() noexcept;
+	void drawPatternFill() noexcept;
+	void drawPatternPreview(const StrokePattern& pattern) noexcept;
+	void drawPatternEditor() noexcept;
+	void drawSnapToGrid() noexcept;
+	void drawOnsetLane(const OverlayDrawingCtx& ctx, const OFS_BeatAnalysisJob::Result& analysis) noexcept;
+	void drawGrid(const OverlayDrawingCtx& ctx) noexcept;
 public:
 	TempoOverlay(ScriptTimeline* timeline) noexcept;
+	virtual void update() noexcept override;
 	virtual void DrawSettings() noexcept override;
 	virtual void DrawScriptPositionContent(const OverlayDrawingCtx& ctx) noexcept override;
 	virtual void nextFrame(float realFrameTime) noexcept override;
