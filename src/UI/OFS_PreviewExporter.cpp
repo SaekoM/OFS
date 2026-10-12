@@ -8,6 +8,7 @@
 #include "OFS_Project.h"
 #include "Funscript.h"
 #include "OFS_Util.h"
+#include "OFS_ImGui.h"
 
 #include "subprocess.h"
 #include "imgui.h"
@@ -29,6 +30,48 @@ static int widthForHeight(int h, uint16_t vw, uint16_t vh) noexcept
     int w = (vh > 0) ? (int)std::lround((double)vw * h / (double)vh) : (h * 16 / 9);
     w -= (w & 1);
     return w < 2 ? 2 : w;
+}
+
+// Even number of pixels, at least 2 (video encoders need even sizes).
+static int evenAtLeastTwo(long pixels) noexcept
+{
+    return pixels < 2 ? 2 : (int)(pixels & ~1L);
+}
+
+// Width of a 16:9 frame of height h.
+static int width169(int h) noexcept
+{
+    return evenAtLeastTwo(std::lround(h * 16.0 / 9.0));
+}
+
+// Pixel layout of an exported frame: the video area on top (the source is fitted
+// inside it) and, optionally, the timeline strip below.
+struct ExportLayout
+{
+    int width = 0;
+    int videoHeight = 0;
+    int stripHeight = 0; // 0 when the timeline isn't appended
+    int TotalHeight() const noexcept { return videoHeight + stripHeight; }
+};
+
+// With 16:9 padding the whole file is 16:9 at the chosen height: the strip's
+// share comes out of the video area (keeping its height relative to the video),
+// so appending the timeline doesn't change the file's shape. Without padding the
+// video keeps the chosen height and the strip extends the frame below it.
+static ExportLayout computeLayout(int resolution, bool padTo169, bool withStrip, float stripFrac,
+    uint16_t vw, uint16_t vh) noexcept
+{
+    ExportLayout layout;
+    if (padTo169) {
+        layout.width = width169(resolution);
+        layout.stripHeight = withStrip ? evenAtLeastTwo(std::lround(resolution * stripFrac / (1.0 + stripFrac))) : 0;
+        layout.videoHeight = resolution - layout.stripHeight;
+    } else {
+        layout.width = widthForHeight(resolution, vw, vh);
+        layout.videoHeight = resolution;
+        layout.stripHeight = withStrip ? evenAtLeastTwo(std::lround(stripFrac * resolution)) : 0;
+    }
+    return layout;
 }
 
 // Stroke position (0..1) of the active script at time t; centered if it has no data.
@@ -205,13 +248,8 @@ void OFS_PreviewExporter::startExport(const std::string& outputPath, const std::
     const int N = (int)segments.size();
     const bool compilation = N > 1;   // several slices concatenated
 
-    const int outH = st.resolution; // height of the video region
     const uint16_t vw = app->player->VideoWidth();
     const uint16_t vh = app->player->VideoHeight();
-    // With 16:9 padding the video region becomes a fixed landscape frame; the
-    // source is scaled to fit and centered inside it with black bars.
-    const int outW = st.padTo169 ? (((int)std::lround(outH * 16.0 / 9.0)) & ~1)
-                                 : widthForHeight(outH, vw, vh);
 
     const bool haveScript = !app->LoadedFunscripts().empty();
     const bool doSim = st.overlaySim && haveScript;
@@ -220,10 +258,13 @@ void OFS_PreviewExporter::startExport(const std::string& outputPath, const std::
     const bool useFC = needFrames || st.padTo169 || compilation; // needs -filter_complex
     const bool wantAudio = (st.format == 1) && app->player->HasAudio(); // AV1 carries audio
 
-    // Timeline strip band height (extends the canvas below the video region).
-    int bandH = 0;
-    if (doTimeline) { bandH = ((int)std::lround(st.timelineHeightFrac * outH)) & ~1; if (bandH < 2) bandH = 2; }
-    const int totalH = outH + bandH;
+    // With 16:9 padding the source is scaled to fit the video area and centered
+    // with black bars; the timeline strip (if any) sits below the video area.
+    const ExportLayout layout = computeLayout(st.resolution, st.padTo169, doTimeline, st.timelineHeightFrac, vw, vh);
+    const int outW = layout.width;
+    const int outH = layout.videoHeight; // height of the video area
+    const int bandH = layout.stripHeight;
+    const int totalH = layout.TotalHeight();
 
     // Sim overlay rect, positioned against the (padded) video region.
     int ox = 0, oy = 0, ow = 0, oh = 0;
@@ -445,17 +486,19 @@ void OFS_PreviewExporter::ShowWindow(bool* open) noexcept
 
     ImGui::Combo("Format", &st.format, "Animated WebP\0AV1 (mp4)\0\0");
 
-    // Resolution: standard heights <= native, at the video's aspect.
+    // Resolution: standard heights <= native. Labels show the finished file's size:
+    // 16:9 when padding, otherwise the video's own aspect.
     {
+        auto labelWidth = [&](int h) { return st.padTo169 ? width169(h) : widthForHeight(h, vw, vh); };
         char curLabel[32];
-        stbsp_snprintf(curLabel, sizeof(curLabel), "%dx%d", widthForHeight(st.resolution, vw, vh), st.resolution);
+        stbsp_snprintf(curLabel, sizeof(curLabel), "%dx%d", labelWidth(st.resolution), st.resolution);
         if (ImGui::BeginCombo("Resolution", curLabel)) {
             // 90 gives 160x90 for 16:9 sources (thumbnails); 180 -> 320x180.
             static const int heights[] = {2160, 1440, 1080, 720, 540, 480, 360, 240, 180, 90};
             for (int h : heights) {
                 if (vh > 0 && h > (int)vh) continue; // no upscaling
                 char lbl[32];
-                stbsp_snprintf(lbl, sizeof(lbl), "%dx%d", widthForHeight(h, vw, vh), h);
+                stbsp_snprintf(lbl, sizeof(lbl), "%dx%d", labelWidth(h), h);
                 if (ImGui::Selectable(lbl, st.resolution == h)) st.resolution = h;
             }
             ImGui::EndCombo();
@@ -463,7 +506,9 @@ void OFS_PreviewExporter::ShowWindow(bool* open) noexcept
     }
 
     {
-        ImGui::Checkbox("Pad video to 16:9 (black bars)", &st.padTo169);
+        ImGui::Checkbox("Pad to 16:9 (black bars)", &st.padTo169);
+        OFS::Tooltip("The whole file is 16:9 at the chosen resolution. With the timeline appended,\n"
+            "the video area shrinks to make room for the strip, so the file stays 16:9.");
         if (vw > 0 && vh > vw) {
             ImGui::SameLine();
             ImGui::TextDisabled("(recommended for vertical video)");
@@ -531,13 +576,15 @@ void OFS_PreviewExporter::ShowWindow(bool* open) noexcept
         const uint32_t frameTex = app->player->FrameTexture();
         if (frameTex && vw > 0 && vh > 0) {
             ImGui::TextDisabled(st.padTo169
-                ? "16:9 preview \xE2\x80\xA2 drag the sim into the black bars \xE2\x80\xA2 corner to resize"
+                ? "Padded video area \xE2\x80\xA2 drag the sim into the black bars \xE2\x80\xA2 corner to resize"
                 : "Drag to move \xE2\x80\xA2 drag corner to resize");
             float previewW = ImGui::GetContentRegionAvail().x;
             if (previewW > 480.f) previewW = 480.f;
-            // When padding to 16:9 the drag canvas is the padded frame (so overlays can
-            // be positioned in the bars); otherwise it's the video at its native aspect.
-            const float previewH = st.padTo169 ? (previewW * 9.f / 16.f)
+            // When padding the drag canvas is the padded video area (so overlays can be
+            // positioned in the bars); otherwise it's the video at its native aspect.
+            const ExportLayout layout = computeLayout(st.resolution, st.padTo169,
+                st.overlayTimeline && !app->LoadedFunscripts().empty(), st.timelineHeightFrac, vw, vh);
+            const float previewH = st.padTo169 ? (previewW * layout.videoHeight / (float)layout.width)
                                                : (previewW * (float)vh / (float)vw);
             const ImVec2 origin = ImGui::GetCursorScreenPos();
             auto* dl = ImGui::GetWindowDrawList();
@@ -665,8 +712,8 @@ void OFS_PreviewExporter::ShowWindow(bool* open) noexcept
             ImGui::TextDisabled("No script loaded \xE2\x80\x94 nothing to draw.");
         } else if (vw > 0 && vh > 0) {
             const float previewW = Util::Min(ImGui::GetContentRegionAvail().x, 480.f);
-            const float aspect = st.padTo169 ? (9.f / 16.f) : ((float)vh / (float)vw);
-            const float stripH = previewW * aspect * st.timelineHeightFrac;
+            const ExportLayout layout = computeLayout(st.resolution, st.padTo169, true, st.timelineHeightFrac, vw, vh);
+            const float stripH = previewW * layout.stripHeight / (float)layout.width;
             const ImVec2 origin = ImGui::GetCursorScreenPos();
             OFS_TimelineRaster::DrawInto(ImGui::GetWindowDrawList(), origin, ImVec2(previewW, stripH),
                               app->LoadedFunscripts(), (int)app->LoadedProject->ActiveIdx(),
